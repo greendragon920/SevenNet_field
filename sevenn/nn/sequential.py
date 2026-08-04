@@ -107,6 +107,20 @@ class AtomGraphSequential(nn.Sequential):
                 pass
         self.is_batch_data = flag
 
+    @torch.jit.unused
+    def set_compute_field_response(self, flag: bool) -> None:
+        """
+        Turn the electric-field derivative machinery on/off.
+
+        Setting the field to zero already makes energy/force/stress identical to
+        the field-free model, but it does not save any compute: the double
+        backward still runs. This is the switch that actually saves it, e.g. for
+        plain MD with a field-aware checkpoint.
+        """
+        module = self._modules.get('field_response')
+        if module is not None:
+            module.enabled = flag  # type: ignore
+
     def get_irreps_in(self, modlue_name: str, attr_key: str = 'irreps_in'):
         tg_module = self._modules[modlue_name]
         for m in tg_module.modules():

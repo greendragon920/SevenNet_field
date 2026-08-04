@@ -68,6 +68,19 @@ PRED_STRESS: Final[str] = 'inferred_stress'
 PRED_ATOMIC_VIRIAL: Final[str] = 'inferred_atomic_virial'
 SCALED_STRESS: Final[str] = 'scaled_stress'
 
+# ~~ electric field response (see README_FIELD.md) ~~ #
+# Uniform external electric field, in V/Angstrom. Stored per graph as (1, 3) so
+# that PyG collation yields (n_graph, 3), the same trick STRESS uses.
+ELECTRIC_FIELD: Final[str] = 'electric_field'
+# reference labels
+BEC: Final[str] = 'born_effective_charges'  # (N, 3, 3), dimensionless (units of e)
+POLARIZABILITY: Final[str] = 'polarizability'  # (1, 3, 3) per graph, = eps_inf - 1
+# predictions, all obtained by differentiating the electric enthalpy
+PRED_POLARIZATION: Final[str] = 'inferred_polarization'  # (n_graph, 3) e/A^2
+PRED_DIPOLE: Final[str] = 'inferred_dipole'  # (n_graph, 3) e*A, = volume * P
+PRED_BEC: Final[str] = 'inferred_born_effective_charges'  # (N, 3, 3)
+PRED_POLARIZABILITY: Final[str] = 'inferred_polarizability'  # (n_graph, 3, 3)
+
 # very general data property for AtomGraphData
 NUM_ATOMS: Final[str] = 'num_atoms'  # int
 NUM_GHOSTS: Final[str] = 'num_ghosts'
@@ -245,6 +258,11 @@ TRAIN_AVG_NUM_NEIGH = 'train_avg_num_neigh'  # deprecated
 USE_FLASH_TP = 'use_flash_tp'
 CUEQUIVARIANCE_CONFIG = 'cuequivariance_config'
 USE_OEQ = 'use_oeq'
+
+# ~~ electric field response model configuration ~~ #
+USE_ELECTRIC_FIELD = 'use_electric_field'
+FIELD_LMAX = 'field_lmax'  # highest l of Y_lm(E) used. l=0 is never used.
+FIELD_INJECTION_LAYERS = 'field_injection_layers'  # which conv layers to inject at
 
 REG_PARAM = 'regularization_param'
 REG_WEIGHT = 'regularization_weight'

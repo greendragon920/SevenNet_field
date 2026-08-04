@@ -151,6 +151,9 @@ DEFAULT_E3_EQUIVARIANT_MODEL_CONFIG = {
     KEY.USE_FLASH_TP: False,
     KEY.CUEQUIVARIANCE_CONFIG: {},
     KEY.USE_OEQ: False,
+    KEY.USE_ELECTRIC_FIELD: False,
+    KEY.FIELD_LMAX: 2,
+    KEY.FIELD_INJECTION_LAYERS: [0],
 }
 
 
@@ -201,6 +204,11 @@ MODEL_CONFIG_CONDITION = {
     KEY.USE_FLASH_TP: bool,
     KEY.CUEQUIVARIANCE_CONFIG: dict,
     KEY.USE_OEQ: bool,
+    KEY.USE_ELECTRIC_FIELD: bool,
+    KEY.FIELD_LMAX: lambda x: isinstance(x, int) and 1 <= x <= 4,
+    KEY.FIELD_INJECTION_LAYERS: lambda x: isinstance(x, list) and all(
+        isinstance(i, int) and i >= 0 for i in x
+    ),
 }
 
 

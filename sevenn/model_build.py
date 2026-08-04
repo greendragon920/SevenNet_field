@@ -18,6 +18,11 @@ from .nn.edge_embedding import (
     SphericalEncoding,
     XPLORCutoff,
 )
+from .nn.field import (
+    ElectricFieldPrepare,
+    ElectricFieldSelfConnection,
+    FieldResponseOutput,
+)
 from .nn.force_output import ForceStressOutputFromEdge
 from .nn.interaction_blocks import NequIP_interaction_block
 from .nn.linear import AtomReduce, FCN_e3nn, IrrepsLinear
@@ -360,6 +365,72 @@ def patch_oeq(layers: OrderedDict, config: Dict[str, Any]) -> OrderedDict:
     return layers
 
 
+def patch_electric_field(
+    layers: OrderedDict, config: Dict[str, Any]
+) -> OrderedDict:
+    """
+    Make a field-free model field-aware, additively.
+
+    Inserts, and touches nothing else:
+      * 'electric_field_prepare'          at the very front
+      * '{t}_field_self_connection'       right after '{t}_self_connection_intro',
+                                          for each t in field_injection_layers
+      * 'field_response'                  right before 'force_output'
+
+    Every pretrained tensor keeps its shape, so a field-free checkpoint loads
+    with strict=False and only these modules report as missing. See
+    README_FIELD.md.
+    """
+    if not config.get(KEY.USE_ELECTRIC_FIELD, False):
+        return layers
+
+    field_lmax = config[KEY.FIELD_LMAX]
+    inject_at = config[KEY.FIELD_INJECTION_LAYERS]
+    num_conv = config[KEY.NUM_CONVOLUTION]
+
+    _layers = list(layers.items())
+    for t in sorted(set(inject_at), reverse=True):
+        if t < 0 or t >= num_conv:
+            raise ValueError(
+                f'field_injection_layers contains {t}, but this model has '
+                f'{num_conv} convolution layers'
+            )
+        anchor = f'{t}_self_connection_intro'
+        sc = layers.get(anchor)
+        if sc is None:
+            raise ValueError(
+                f'cannot inject the field at layer {t}: {anchor} not found. '
+                "self_connection_type 'none' is not supported."
+            )
+        irreps_x = Irreps(sc.irreps_in if hasattr(sc, 'irreps_in') else sc.irreps_in1)
+        irreps_out = Irreps(sc.irreps_out)
+        module = ElectricFieldSelfConnection(
+            irreps_x=irreps_x,
+            irreps_out=irreps_out,
+            field_lmax=field_lmax,
+        )
+        if module.num_paths() == 0:
+            raise ValueError(
+                f'field injection at layer {t} has no symmetry-allowed paths: '
+                f'{irreps_x} (x) {module.irreps_field} -> {irreps_out} is empty. '
+                'The backbone needs odd-parity features for this to work.'
+            )
+        _layers = _insert_after(
+            anchor, (f'{t}_field_self_connection', module), _layers
+        )
+
+    _layers.insert(0, ('electric_field_prepare', ElectricFieldPrepare()))
+
+    idx = [i for i, (k, _) in enumerate(_layers) if k == 'force_output']
+    response = ('field_response', FieldResponseOutput())
+    if idx:
+        _layers.insert(idx[0], response)
+    else:
+        _layers.append(response)  # parallel models have no force_output
+
+    return OrderedDict(_layers)
+
+
 def patch_modules(layers: OrderedDict, config: Dict[str, Any]) -> OrderedDict:
     layers = patch_modality(layers, config)
     layers = patch_cue(layers, config)
@@ -637,10 +708,16 @@ def build_E3_equivariant_model(
     }
 
     if parallel:
+        if config.get(KEY.USE_ELECTRIC_FIELD, False):
+            raise NotImplementedError(
+                'use_electric_field is not supported for parallel (LAMMPS) models '
+                'yet. See README_FIELD.md.'
+            )
         layers_list = _to_parallel_model(layers, config)
         return [
             AtomGraphSequential(patch_modules(layers, config), **common_args)
             for layers in layers_list
         ]
     else:
+        layers = patch_electric_field(layers, config)
         return AtomGraphSequential(patch_modules(layers, config), **common_args)
