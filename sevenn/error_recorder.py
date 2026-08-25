@@ -60,6 +60,24 @@ _ERROR_TYPES = {
         'coeff': 160.21766208,
         'vdim': 6,
     },
+    # ~~ electric field response (see README_FIELD.md) ~~ #
+    # Both predictions are already Cartesian 3x3, so no irreps conversion is
+    # needed here (SevenNet-Polar's equivalent metric has to call
+    # CartesianTensor.to_cartesian on the prediction first).
+    'BornEffectiveCharges': {
+        'name': 'BornEffectiveCharges',
+        'ref_key': KEY.BEC,
+        'pred_key': KEY.PRED_BEC,
+        'unit': 'e',
+        'vdim': 9,
+    },
+    'Polarizability': {
+        'name': 'Polarizability',
+        'ref_key': KEY.POLARIZABILITY,
+        'pred_key': KEY.PRED_POLARIZABILITY,
+        'unit': '',
+        'vdim': 9,
+    },
     'L2_modal': {
         'name': 'L2_modal',
         'ref_key': None,
@@ -240,6 +258,58 @@ class ComponentRMSError(ErrorMetric):
         return self.value.get() ** 0.5
 
 
+class _CartesianTensorRMSError(ErrorMetric):
+    """
+    RMSE over either the diagonal or the off-diagonal of a 3x3 Cartesian target.
+
+    Reported separately because the two differ by roughly an order of magnitude
+    for both field-response targets (on MP-Dielectrics: Z* diagonal std 2.29 vs
+    off-diagonal 0.41; chi diagonal 4.84 vs off-diagonal 0.30), so a pooled
+    RMSE hides all the off-diagonal error.
+
+    Deliberately does not use ``_retrieve``: its unlabeled-NaN masking flattens
+    the tensor, which would leave nothing to identify the diagonal by. Masking
+    happens here, after reshaping.
+    """
+
+    take_diagonal = True
+
+    def __init__(self, vdim: int = 9, **kwargs) -> None:
+        super().__init__(**kwargs)
+        self._se = torch.nn.MSELoss(reduction='none')
+
+    def update(
+        self, output: 'AtomGraphData', model: Optional[Callable] = None
+    ) -> None:
+        y_ref = (output[self.ref_key] * self.coeff).reshape(-1, 3, 3)
+        y_pred = (output[self.pred_key] * self.coeff).reshape(-1, 3, 3)
+
+        mask = torch.eye(3, dtype=torch.bool, device=y_ref.device)
+        if not self.take_diagonal:
+            mask = ~mask
+        y_ref = y_ref[:, mask]
+        y_pred = y_pred[:, mask]
+
+        if self.ignore_unlabeled:
+            labeled = ~torch.isnan(y_ref)
+            y_ref = y_ref[labeled]
+            y_pred = y_pred[labeled]
+        if y_ref.numel() == 0:
+            return
+        self.value.update(self._se(y_ref, y_pred).reshape(-1))
+
+    def get(self) -> float:
+        return self.value.get() ** 0.5
+
+
+class DiagRMSError(_CartesianTensorRMSError):
+    take_diagonal = True
+
+
+class OffDiagRMSError(_CartesianTensorRMSError):
+    take_diagonal = False
+
+
 class MAError(ErrorMetric):
     """
     Average over all component
@@ -388,6 +458,8 @@ class ErrorRecorder:
         'ComponentRMSE': ComponentRMSError,
         'MAE': MAError,
         'Loss': LossError,
+        'DiagRMSE': DiagRMSError,
+        'OffDiagRMSE': OffDiagRMSError,
     }
 
     def __init__(self, metrics: List[ErrorMetric]) -> None:
@@ -461,9 +533,18 @@ class ErrorRecorder:
                 stress_metric = CustomError(criteria, **get_err_type('Stress'))
                 metrics.append((stress_metric, config[KEY.STRESS_WEIGHT]))
         else:  # TODO: this is hard-coded
-            for efs in ['Energy', 'Force', 'Stress']:
-                if efs == 'Stress' and not is_stress:
-                    continue
+            names = ['Energy', 'Force']
+            if is_stress:
+                names.append('Stress')
+            # Without these, TotalLoss would omit the field-response targets
+            # entirely -- and since energy/force cannot train while the backbone
+            # is frozen, their weights are typically 0 and TotalLoss would be
+            # identically zero, silently breaking best_metric.
+            if config.get(KEY.IS_TRAIN_BEC, False):
+                names.append('BornEffectiveCharges')
+            if config.get(KEY.IS_TRAIN_POLARIZABILITY, False):
+                names.append('Polarizability')
+            for efs in names:
                 lf, w = _get_loss_function_from_name(loss_functions, efs)
                 if lf is None:
                     raise ValueError(f'{efs} not found from loss_functions')

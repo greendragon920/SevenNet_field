@@ -140,6 +140,9 @@ SCHEDULER_BATCH_MODE = 'scheduler_batch_mode'
 ENERGY_WEIGHT = 'energy_loss_weight'
 FORCE_WEIGHT = 'force_loss_weight'
 STRESS_WEIGHT = 'stress_loss_weight'
+# ~~ electric field response training (see README_FIELD.md) ~~ #
+BEC_WEIGHT = 'bec_loss_weight'
+POLARIZABILITY_WEIGHT = 'polarizability_loss_weight'
 GRAD_CLIP = 'grad_clip'
 DEVICE = 'device'
 DTYPE = 'dtype'
@@ -147,6 +150,12 @@ DTYPE = 'dtype'
 TRAIN_SHUFFLE = 'train_shuffle'
 
 IS_TRAIN_STRESS = 'is_train_stress'
+IS_TRAIN_BEC = 'is_train_bec'
+IS_TRAIN_POLARIZABILITY = 'is_train_polarizability'
+# Freeze every pretrained weight and train only the field-injection modules.
+# The optimizer already filters on requires_grad (train/trainer.py), so this
+# only has to flip the flags before the Trainer is built.
+FREEZE_EXCEPT_FIELD = 'freeze_except_field'
 
 CONTINUE = 'continue'
 CHECKPOINT = 'checkpoint'

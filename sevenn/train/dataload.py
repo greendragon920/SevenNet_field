@@ -206,6 +206,21 @@ def atoms_to_graph(
         KEY.PER_ATOM_ENERGY: _correct_scalar(y_energy / len(pos)),
     }
 
+    # ~~ electric field response labels (see README_FIELD.md) ~~ #
+    # Both are Cartesian, matching what FieldResponseOutput predicts directly,
+    # so no irreps conversion is needed anywhere. NaN means "unlabeled" and is
+    # dropped by LossDefinition._ignore_unlabeled.
+    y_bec = atoms.arrays.get('y_bec')
+    if y_bec is None:
+        y_bec = np.full((len(atomic_numbers), 3, 3), np.nan)
+    data[KEY.BEC] = np.asarray(y_bec, dtype=float).reshape(-1, 3, 3)
+
+    y_chi = atoms.info.get('y_polarizability')
+    if y_chi is None:
+        y_chi = np.full((3, 3), np.nan)
+    # per graph, stored as (1, 3, 3) so PyG collation yields (n_graph, 3, 3)
+    data[KEY.POLARIZABILITY] = np.asarray(y_chi, dtype=float).reshape(1, 3, 3)
+
     if with_shift:
         data[KEY.CELL_SHIFT] = shift
         data[KEY.CELL] = cell
@@ -216,6 +231,7 @@ def atoms_to_graph(
         info.pop('y_energy', None)
         info.pop('y_force', None)
         info.pop('y_stress', None)
+        info.pop('y_polarizability', None)
         data[KEY.INFO] = info
     else:
         data[KEY.INFO] = {}
@@ -302,6 +318,8 @@ def _set_atoms_y(
     energy_key: Optional[str] = None,
     force_key: Optional[str] = None,
     stress_key: Optional[str] = None,
+    bec_key: Optional[str] = None,
+    polarizability_key: Optional[str] = None,
 ) -> List[ase.Atoms]:
     """
     Define how SevenNet reads ASE.atoms object for its y label
@@ -340,10 +358,34 @@ def _set_atoms_y(
             atoms.arrays['y_force'] = from_calc['force']
 
         if stress_key is not None:
-            y_stress = -1 * atoms.info.pop(stress_key)
-            atoms.info['y_stress'] = np.array(y_stress[[0, 1, 2, 5, 3, 4]])
+            y_stress = -1 * np.asarray(atoms.info.pop(stress_key), dtype=float)
+            if y_stress.size == 9:
+                # Full 3x3 (or its flattened form), as MP-Dielectrics writes it.
+                # The Voigt reindex below assumes an already-Voigt-6 vector and
+                # would silently scramble a 9-value tensor into
+                # (xx, xy, xz, yz, yy, yx), so extract Voigt order explicitly.
+                m = y_stress.reshape(3, 3)
+                y_stress = np.array(
+                    [m[0, 0], m[1, 1], m[2, 2], m[1, 2], m[0, 2], m[0, 1]]
+                )
+            else:
+                y_stress = y_stress[[0, 1, 2, 5, 3, 4]]
+            atoms.info['y_stress'] = np.array(y_stress)
         else:
             atoms.info['y_stress'] = from_calc['stress']
+
+        # Field-response labels. Unlike E/F/S these have no ASE calculator
+        # equivalent, so they are read from arrays/info only and simply stay
+        # absent (-> NaN -> ignored by the loss) when not given.
+        # The key may be absent on individual structures: a replay set of
+        # energies/forces/stresses mixed into the same training run carries no
+        # field labels. Those become NaN in atoms_to_graph and are dropped by
+        # LossDefinition._ignore_unlabeled, which is how per-task masking of
+        # heterogeneous labels works. So missing is normal, not an error.
+        if bec_key is not None and bec_key in atoms.arrays:
+            atoms.arrays['y_bec'] = atoms.arrays.pop(bec_key)
+        if polarizability_key is not None and polarizability_key in atoms.info:
+            atoms.info['y_polarizability'] = atoms.info.pop(polarizability_key)
 
     return atoms_list
 
@@ -353,6 +395,8 @@ def ase_reader(
     energy_key: Optional[str] = None,
     force_key: Optional[str] = None,
     stress_key: Optional[str] = None,
+    bec_key: Optional[str] = None,
+    polarizability_key: Optional[str] = None,
     index: str = ':',
     **kwargs,
 ) -> List[ase.Atoms]:
@@ -363,7 +407,9 @@ def ase_reader(
     if not isinstance(atoms_list, list):
         atoms_list = [atoms_list]
 
-    return _set_atoms_y(atoms_list, energy_key, force_key, stress_key)
+    return _set_atoms_y(
+        atoms_list, energy_key, force_key, stress_key, bec_key, polarizability_key
+    )
 
 
 # Reader

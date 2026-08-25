@@ -25,13 +25,24 @@ IMPLEMENTED_MODAL_MODULE_DICT = {
 IMPLEMENTED_SHIFT = ['per_atom_energy_mean', 'elemwise_reference_energies']
 IMPLEMENTED_SCALE = ['force_rms', 'per_atom_energy_std', 'elemwise_force_rms']
 
-SUPPORTING_METRICS = ['RMSE', 'ComponentRMSE', 'MAE', 'Loss']
+SUPPORTING_METRICS = [
+    'RMSE',
+    'ComponentRMSE',
+    'MAE',
+    'Loss',
+    # for the 3x3 Cartesian field-response targets, whose diagonal and
+    # off-diagonal magnitudes differ by about an order of magnitude
+    'DiagRMSE',
+    'OffDiagRMSE',
+]
 SUPPORTING_ERROR_TYPES = [
     'TotalEnergy',
     'Energy',
     'Force',
     'Stress',
     'Stress_GPa',
+    'BornEffectiveCharges',
+    'Polarizability',
     'TotalLoss',
     'L2_modal',
     'Modal_cos',
@@ -297,6 +308,11 @@ DEFAULT_TRAINING_CONFIG = {
     KEY.ENERGY_WEIGHT: 1.0,
     KEY.FORCE_WEIGHT: 0.1,
     KEY.STRESS_WEIGHT: 1e-6,  # SIMPLE-NN default
+    # 0.15 puts chi on the same footing as Z*: the chi/Z* label variance ratio
+    # is 6.2 on the MP-Dielectrics trainset after clipping unphysical chi.
+    # See claude_test_folder/inspect_dataset_labels.out
+    KEY.BEC_WEIGHT: 1.0,
+    KEY.POLARIZABILITY_WEIGHT: 0.15,
     KEY.GRAD_CLIP: None,
     KEY.REG_PARAM: {},
     KEY.PER_EPOCH: 5,
@@ -315,6 +331,9 @@ DEFAULT_TRAINING_CONFIG = {
     KEY.CSV_LOG: 'log.csv',
     KEY.NUM_WORKERS: 0,
     KEY.IS_TRAIN_STRESS: True,
+    KEY.IS_TRAIN_BEC: False,
+    KEY.IS_TRAIN_POLARIZABILITY: False,
+    KEY.FREEZE_EXCEPT_FIELD: False,
     KEY.TRAIN_SHUFFLE: True,
     KEY.ERROR_RECORD: [
         ['Energy', 'RMSE'],
@@ -351,6 +370,11 @@ TRAINING_CONFIG_CONDITION = {
     },
     KEY.DEFAULT_MODAL: str,
     KEY.IS_TRAIN_STRESS: bool,
+    KEY.IS_TRAIN_BEC: bool,
+    KEY.IS_TRAIN_POLARIZABILITY: bool,
+    KEY.FREEZE_EXCEPT_FIELD: bool,
+    KEY.BEC_WEIGHT: float,
+    KEY.POLARIZABILITY_WEIGHT: float,
     KEY.TRAIN_SHUFFLE: bool,
     KEY.ERROR_RECORD: error_record_condition,
     KEY.BEST_METRIC: str,
@@ -366,4 +390,25 @@ def train_defaults(config):
         config[KEY.IS_TRAIN_STRESS] = defaults[KEY.IS_TRAIN_STRESS]
     if not config[KEY.IS_TRAIN_STRESS]:
         defaults.pop(KEY.STRESS_WEIGHT, None)
+
+    # Field-response targets. Their weights are only meaningful when the
+    # corresponding target is trained, and the default error_record has no
+    # entries for them, so append those too -- otherwise you train blind.
+    for flag, weight, metrics in (
+        (KEY.IS_TRAIN_BEC, KEY.BEC_WEIGHT, [
+            ['BornEffectiveCharges', 'DiagRMSE'],
+            ['BornEffectiveCharges', 'OffDiagRMSE'],
+        ]),
+        (KEY.IS_TRAIN_POLARIZABILITY, KEY.POLARIZABILITY_WEIGHT, [
+            ['Polarizability', 'DiagRMSE'],
+            ['Polarizability', 'OffDiagRMSE'],
+        ]),
+    ):
+        if flag not in config:
+            config[flag] = defaults[flag]
+        if not config[flag]:
+            defaults.pop(weight, None)
+        elif KEY.ERROR_RECORD not in config:
+            record = [m for m in defaults[KEY.ERROR_RECORD] if m != ['TotalLoss', 'None']]
+            defaults[KEY.ERROR_RECORD] = record + metrics + [['TotalLoss', 'None']]
     return defaults

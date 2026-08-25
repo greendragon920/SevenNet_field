@@ -206,6 +206,110 @@ class StressLoss(LossDefinition):
         return pred, ref, w_tensor
 
 
+class _CartesianTensorLoss(LossDefinition):
+    """
+    Loss for a 3x3 Cartesian tensor target, per atom or per graph.
+
+    Both field-response predictions are already Cartesian -- Z* comes out of
+    ``d(dipole_a)/dr_ib`` and chi out of ``d(dipole_a)/dE_b`` -- so unlike
+    SevenNet-Polar, which emits BEC in irreps form and has to round-trip the
+    reference through ``e3nn.io.CartesianTensor``, the reference and prediction
+    are directly comparable. The base ``_preprocess`` flattening is all we need.
+
+    ``get_loss`` is scaled by 9 because flattening divides the mean by 9*N
+    instead of N, which would otherwise shrink these gradients ninefold
+    relative to the energy/force terms.
+    """
+
+    n_component = 9
+
+    def _preprocess(
+        self, batch_data: Dict[str, Any], model: Optional[Callable] = None
+    ) -> Tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor]]:
+        assert isinstance(self.pred_key, str) and isinstance(self.ref_key, str)
+
+        pred = torch.reshape(batch_data[self.pred_key], (-1,))
+        ref = torch.reshape(batch_data[self.ref_key], (-1,))
+        w_tensor = None
+
+        if self.use_weight:
+            weight = batch_data[KEY.DATA_WEIGHT][self.name.lower()]
+            if self.is_per_atom:
+                weight = weight[batch_data[KEY.BATCH]]
+            w_tensor = torch.repeat_interleave(weight, self.n_component)
+
+        return pred, ref, w_tensor
+
+    def get_loss(self, batch_data: Dict[str, Any], model: Optional[Callable] = None):
+        loss = super().get_loss(batch_data, model)
+        # The x9 undoes the componentwise mean that flattening introduces, so
+        # the weight refers to a whole tensor rather than one component. L2MAE
+        # already reduces per tensor (it takes the norm over the 9 components),
+        # so applying it there would count the same factor twice.
+        from sevenn.train.optim import L2MAE
+        if isinstance(self.criterion, L2MAE):
+            return loss
+        return loss * float(self.n_component)
+
+
+class BECLoss(_CartesianTensorLoss):
+    """
+    Loss for Born effective charges, Z*_{i,ab} = d(dipole_a)/dr_{ib}, per atom.
+    """
+
+    is_per_atom = True
+
+    def __init__(
+        self,
+        name: str = 'BornEffectiveCharges',
+        unit: str = 'e',
+        criterion: Optional[Callable] = None,
+        ref_key: str = KEY.BEC,
+        pred_key: str = KEY.PRED_BEC,
+        **kwargs,
+    ) -> None:
+        super().__init__(
+            name=name,
+            unit=unit,
+            criterion=criterion,
+            ref_key=ref_key,
+            pred_key=pred_key,
+            **kwargs,
+        )
+
+
+class PolarizabilityLoss(_CartesianTensorLoss):
+    """
+    Loss for the electronic polarizability chi = eps_inf - 1, per graph.
+
+    The model's chi is symmetric by construction (Maxwell reciprocity), while
+    the MP-Dielectrics labels are only symmetric to ~7e-2. That antisymmetric
+    part is unfittable by design; it sets a floor on the achievable RMSE rather
+    than a bias, since a symmetric prediction is the least-squares optimum for
+    an almost-symmetric target.
+    """
+
+    is_per_atom = False
+
+    def __init__(
+        self,
+        name: str = 'Polarizability',
+        unit: str = '',
+        criterion: Optional[Callable] = None,
+        ref_key: str = KEY.POLARIZABILITY,
+        pred_key: str = KEY.PRED_POLARIZABILITY,
+        **kwargs,
+    ) -> None:
+        super().__init__(
+            name=name,
+            unit=unit,
+            criterion=criterion,
+            ref_key=ref_key,
+            pred_key=pred_key,
+            **kwargs,
+        )
+
+
 class L2Regularization(LossDefinition):
     """
     L2 regularization for task-specific (modal) parameters.
@@ -295,7 +399,7 @@ def make_loss_info_dict_from_config(config: Dict[str, Any]):
     loss_info_dict = {}
     loss_type = config.get(KEY.LOSS, 'mse').lower()
     loss_param = config.get(KEY.LOSS_PARAM, {})
-    for key in ['energy', 'force', 'stress']:
+    for key in ['energy', 'force', 'stress', 'bec', 'polarizability']:
         loss_info_dict[key] = {}
         # loss_weight not initialized here.
         loss_info_dict[key].update(
@@ -322,11 +426,15 @@ def get_loss_functions_from_config(
         'energy': PerAtomEnergyLoss,
         'force': ForceLoss,
         'stress': StressLoss,
+        'bec': BECLoss,
+        'polarizability': PolarizabilityLoss,
     }
     loss_weights = {
         'energy': config.get(KEY.ENERGY_WEIGHT, 1.0),
         'force': config[KEY.FORCE_WEIGHT],
         'stress': config[KEY.STRESS_WEIGHT],
+        'bec': config.get(KEY.BEC_WEIGHT, 1.0),
+        'polarizability': config.get(KEY.POLARIZABILITY_WEIGHT, 0.15),
     }
 
     use_weight = config.get(KEY.USE_WEIGHT, False)
@@ -335,6 +443,10 @@ def get_loss_functions_from_config(
     keys = ['energy', 'force']
     if config[KEY.IS_TRAIN_STRESS]:
         keys += ['stress']
+    if config.get(KEY.IS_TRAIN_BEC, False):
+        keys += ['bec']
+    if config.get(KEY.IS_TRAIN_POLARIZABILITY, False):
+        keys += ['polarizability']
 
     for key in keys:
         loss_info = loss_info_dict.get(key, {})

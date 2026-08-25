@@ -102,6 +102,48 @@ def datasets_from_py(config, script):
 
 
 # TODO: check backward compatibility this part (batch vs. epoch)
+def freeze_backbone_for_field_training(model, config, log) -> None:
+    """
+    Train only the electric-field injection modules, freezing everything else.
+
+    Intended for making a pretrained checkpoint field-aware without risking its
+    energy/force/stress accuracy (README_FIELD.md). Trainer builds its optimizer
+    from ``[p for p in model.parameters() if p.requires_grad]``, so flipping the
+    flags before the Trainer exists is all that is needed.
+
+    Note the energy/force/stress losses become dead weight under this setting:
+    at E = 0 the field term is identically zero, so those predictions do not
+    depend on the field weights at all and their gradient is exactly zero. Their
+    reported RMSE should stay perfectly flat, which doubles as a check that the
+    freeze took effect.
+    """
+    if not config.get(KEY.FREEZE_EXCEPT_FIELD, False):
+        return
+    if not config.get(KEY.USE_ELECTRIC_FIELD, False):
+        raise ValueError(
+            f'{KEY.FREEZE_EXCEPT_FIELD} requires {KEY.USE_ELECTRIC_FIELD}: '
+            'there would be no trainable parameter left.'
+        )
+
+    n_train, n_frozen = 0, 0
+    for name, param in model.named_parameters():
+        trainable = 'field' in name
+        param.requires_grad_(trainable)
+        if trainable:
+            n_train += param.numel()
+        else:
+            n_frozen += param.numel()
+    if n_train == 0:
+        raise ValueError(
+            'freeze_except_field left no trainable parameter; no module name '
+            "contains 'field'."
+        )
+    log.write(
+        f'Backbone frozen: training {n_train} field parameters, '
+        f'{n_frozen} frozen\n'
+    )
+
+
 def train_v2(config: Dict[str, Any], working_dir: str) -> None:
     """
     Main program flow, since v0.9.6
@@ -182,6 +224,7 @@ def train_v2(config: Dict[str, Any], working_dir: str) -> None:
     log.write('\nModel building...\n')
     model = build_E3_equivariant_model(config)
     log.print_model_info(model, config)
+    freeze_backbone_for_field_training(model, config, log)
 
     if config.get(KEY.REHEARSAL, False):
         memory_loader = build_memory_loader(config)
@@ -241,6 +284,7 @@ def train(config, working_dir: str):
 
     log.write('Model building was successful\n')
 
+    freeze_backbone_for_field_training(model, config, log)
     trainer = Trainer.from_config(model, config)
     if state_dicts:
         state_dicts = convert_modality_of_checkpoint_state_dct(config, state_dicts)
