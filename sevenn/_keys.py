@@ -75,6 +75,16 @@ ELECTRIC_FIELD: Final[str] = 'electric_field'
 # reference labels
 BEC: Final[str] = 'born_effective_charges'  # (N, 3, 3), dimensionless (units of e)
 POLARIZABILITY: Final[str] = 'polarizability'  # (1, 3, 3) per graph, = eps_inf - 1
+# (1, 3) per graph, e/Angstrom^2. Berry-phase polarization, and therefore
+# defined only modulo the polarization lattice cell/|Omega|: a reference value
+# sits on whichever branch its own calculation picked. Do NOT assume a dataset
+# ships one common branch -- measured, MP-Ferroelectrics has 24% of its frames
+# beyond half a quantum and the whole BaTiO3 label range fits inside a single
+# quantum. Losses and metrics on this key must fold; see
+# train/loss.py:fold_polarization_difference.
+# Unlike chi this is a FIRST derivative of F wrt E, so it trains the same Y_1
+# weights Z* does.
+POLARIZATION: Final[str] = 'polarization'
 # predictions, all obtained by differentiating the electric enthalpy
 PRED_POLARIZATION: Final[str] = 'inferred_polarization'  # (n_graph, 3) e/A^2
 PRED_DIPOLE: Final[str] = 'inferred_dipole'  # (n_graph, 3) e*A, = volume * P
@@ -143,6 +153,7 @@ STRESS_WEIGHT = 'stress_loss_weight'
 # ~~ electric field response training (see README_FIELD.md) ~~ #
 BEC_WEIGHT = 'bec_loss_weight'
 POLARIZABILITY_WEIGHT = 'polarizability_loss_weight'
+POLARIZATION_WEIGHT = 'polarization_loss_weight'
 GRAD_CLIP = 'grad_clip'
 DEVICE = 'device'
 DTYPE = 'dtype'
@@ -152,6 +163,7 @@ TRAIN_SHUFFLE = 'train_shuffle'
 IS_TRAIN_STRESS = 'is_train_stress'
 IS_TRAIN_BEC = 'is_train_bec'
 IS_TRAIN_POLARIZABILITY = 'is_train_polarizability'
+IS_TRAIN_POLARIZATION = 'is_train_polarization'
 # Freeze every pretrained weight and train only the field-injection modules.
 # The optimizer already filters on requires_grad (train/trainer.py), so this
 # only has to flip the flags before the Trainer is built.

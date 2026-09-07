@@ -19,7 +19,15 @@ class L2MAE(nn.Module):
     the concatenation below does; a full 3x3 must not be duplicated that way.
     """
 
-    N_COMPONENT = {'force': 3, 'stress': 6, 'bec': 9, 'polarizability': 9}
+    # A prop missing from this map silently falls back to 6 (Voigt stress) and
+    # then dies in view() with a shape error -- add every new target here.
+    N_COMPONENT = {
+        'force': 3,
+        'stress': 6,
+        'bec': 9,
+        'polarizability': 9,
+        'polarization': 3,
+    }
 
     def __init__(
         self,

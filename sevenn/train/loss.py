@@ -310,6 +310,50 @@ class PolarizabilityLoss(_CartesianTensorLoss):
         )
 
 
+class PolarizationLoss(_CartesianTensorLoss):
+    """
+    Loss for the polarization P = -dF/dE / volume, per graph, in e/Angstrom^2.
+
+    P is a rank-1 target, so n_component is 3 rather than 9; the base class is
+    otherwise unchanged, since its flattening and per-tensor weighting do not
+    care about the rank.
+
+    Why this matters beyond adding a target: P is the FIRST derivative of the
+    electric enthalpy with respect to E, so it trains exactly the Y_1 field
+    weights that Z* = d(dipole)/dr does -- chi, the second derivative, trains
+    the Y_2 weights instead and is disjoint from both. A BEC-only dataset
+    therefore supervises Y_1 at one geometry per material, while a polarization
+    dataset along a distortion path supervises the same weights across many
+    geometries of the same material. That is the gap MP-Ferroelectrics fills.
+
+    Berry-phase P is multivalued modulo the polarization lattice, so a plain
+    componentwise difference is only meaningful if every reference frame happens
+    to sit on one common branch. Nothing here checks that, and the next commit
+    stops assuming it.
+    """
+
+    n_component = 3
+    is_per_atom = False
+
+    def __init__(
+        self,
+        name: str = 'Polarization',
+        unit: str = 'e/Ang^2',
+        criterion: Optional[Callable] = None,
+        ref_key: str = KEY.POLARIZATION,
+        pred_key: str = KEY.PRED_POLARIZATION,
+        **kwargs,
+    ) -> None:
+        super().__init__(
+            name=name,
+            unit=unit,
+            criterion=criterion,
+            ref_key=ref_key,
+            pred_key=pred_key,
+            **kwargs,
+        )
+
+
 class L2Regularization(LossDefinition):
     """
     L2 regularization for task-specific (modal) parameters.
@@ -399,7 +443,7 @@ def make_loss_info_dict_from_config(config: Dict[str, Any]):
     loss_info_dict = {}
     loss_type = config.get(KEY.LOSS, 'mse').lower()
     loss_param = config.get(KEY.LOSS_PARAM, {})
-    for key in ['energy', 'force', 'stress', 'bec', 'polarizability']:
+    for key in ['energy', 'force', 'stress', 'bec', 'polarizability', 'polarization']:
         loss_info_dict[key] = {}
         # loss_weight not initialized here.
         loss_info_dict[key].update(
@@ -428,6 +472,7 @@ def get_loss_functions_from_config(
         'stress': StressLoss,
         'bec': BECLoss,
         'polarizability': PolarizabilityLoss,
+        'polarization': PolarizationLoss,
     }
     loss_weights = {
         'energy': config.get(KEY.ENERGY_WEIGHT, 1.0),
@@ -435,6 +480,7 @@ def get_loss_functions_from_config(
         'stress': config[KEY.STRESS_WEIGHT],
         'bec': config.get(KEY.BEC_WEIGHT, 1.0),
         'polarizability': config.get(KEY.POLARIZABILITY_WEIGHT, 0.15),
+        'polarization': config.get(KEY.POLARIZATION_WEIGHT, 1.0),
     }
 
     use_weight = config.get(KEY.USE_WEIGHT, False)
@@ -447,6 +493,8 @@ def get_loss_functions_from_config(
         keys += ['bec']
     if config.get(KEY.IS_TRAIN_POLARIZABILITY, False):
         keys += ['polarizability']
+    if config.get(KEY.IS_TRAIN_POLARIZATION, False):
+        keys += ['polarization']
 
     for key in keys:
         loss_info = loss_info_dict.get(key, {})

@@ -43,6 +43,7 @@ SUPPORTING_ERROR_TYPES = [
     'Stress_GPa',
     'BornEffectiveCharges',
     'Polarizability',
+    'Polarization',
     'TotalLoss',
     'L2_modal',
     'Modal_cos',
@@ -313,6 +314,7 @@ DEFAULT_TRAINING_CONFIG = {
     # See claude_test_folder/inspect_dataset_labels.out
     KEY.BEC_WEIGHT: 1.0,
     KEY.POLARIZABILITY_WEIGHT: 0.15,
+    KEY.POLARIZATION_WEIGHT: 1.0,
     KEY.GRAD_CLIP: None,
     KEY.REG_PARAM: {},
     KEY.PER_EPOCH: 5,
@@ -333,6 +335,7 @@ DEFAULT_TRAINING_CONFIG = {
     KEY.IS_TRAIN_STRESS: True,
     KEY.IS_TRAIN_BEC: False,
     KEY.IS_TRAIN_POLARIZABILITY: False,
+    KEY.IS_TRAIN_POLARIZATION: False,
     KEY.FREEZE_EXCEPT_FIELD: False,
     KEY.TRAIN_SHUFFLE: True,
     KEY.ERROR_RECORD: [
@@ -372,9 +375,11 @@ TRAINING_CONFIG_CONDITION = {
     KEY.IS_TRAIN_STRESS: bool,
     KEY.IS_TRAIN_BEC: bool,
     KEY.IS_TRAIN_POLARIZABILITY: bool,
+    KEY.IS_TRAIN_POLARIZATION: bool,
     KEY.FREEZE_EXCEPT_FIELD: bool,
     KEY.BEC_WEIGHT: float,
     KEY.POLARIZABILITY_WEIGHT: float,
+    KEY.POLARIZATION_WEIGHT: float,
     KEY.TRAIN_SHUFFLE: bool,
     KEY.ERROR_RECORD: error_record_condition,
     KEY.BEST_METRIC: str,
@@ -402,6 +407,11 @@ def train_defaults(config):
         (KEY.IS_TRAIN_POLARIZABILITY, KEY.POLARIZABILITY_WEIGHT, [
             ['Polarizability', 'DiagRMSE'],
             ['Polarizability', 'OffDiagRMSE'],
+        ]),
+        # P is a vector, so there is no diagonal/off-diagonal split to make --
+        # a single RMSE is the whole story here, unlike the rank-2 targets.
+        (KEY.IS_TRAIN_POLARIZATION, KEY.POLARIZATION_WEIGHT, [
+            ['Polarization', 'RMSE'],
         ]),
     ):
         if flag not in config:

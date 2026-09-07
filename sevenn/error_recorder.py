@@ -71,6 +71,13 @@ _ERROR_TYPES = {
         'unit': 'e',
         'vdim': 9,
     },
+    'Polarization': {
+        'name': 'Polarization',
+        'ref_key': KEY.POLARIZATION,
+        'pred_key': KEY.PRED_POLARIZATION,
+        'unit': 'e/Ang^2',
+        'vdim': 3,
+    },
     'Polarizability': {
         'name': 'Polarizability',
         'ref_key': KEY.POLARIZABILITY,
@@ -544,6 +551,8 @@ class ErrorRecorder:
                 names.append('BornEffectiveCharges')
             if config.get(KEY.IS_TRAIN_POLARIZABILITY, False):
                 names.append('Polarizability')
+            if config.get(KEY.IS_TRAIN_POLARIZATION, False):
+                names.append('Polarization')
             for efs in names:
                 lf, w = _get_loss_function_from_name(loss_functions, efs)
                 if lf is None:

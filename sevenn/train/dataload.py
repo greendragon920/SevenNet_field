@@ -221,6 +221,12 @@ def atoms_to_graph(
     # per graph, stored as (1, 3, 3) so PyG collation yields (n_graph, 3, 3)
     data[KEY.POLARIZABILITY] = np.asarray(y_chi, dtype=float).reshape(1, 3, 3)
 
+    y_pol = atoms.info.get('y_polarization')
+    if y_pol is None:
+        y_pol = np.full(3, np.nan)
+    # per graph, stored as (1, 3) so PyG collation yields (n_graph, 3)
+    data[KEY.POLARIZATION] = np.asarray(y_pol, dtype=float).reshape(1, 3)
+
     if with_shift:
         data[KEY.CELL_SHIFT] = shift
         data[KEY.CELL] = cell
@@ -232,6 +238,7 @@ def atoms_to_graph(
         info.pop('y_force', None)
         info.pop('y_stress', None)
         info.pop('y_polarizability', None)
+        info.pop('y_polarization', None)
         data[KEY.INFO] = info
     else:
         data[KEY.INFO] = {}
@@ -320,6 +327,7 @@ def _set_atoms_y(
     stress_key: Optional[str] = None,
     bec_key: Optional[str] = None,
     polarizability_key: Optional[str] = None,
+    polarization_key: Optional[str] = None,
 ) -> List[ase.Atoms]:
     """
     Define how SevenNet reads ASE.atoms object for its y label
@@ -386,6 +394,8 @@ def _set_atoms_y(
             atoms.arrays['y_bec'] = atoms.arrays.pop(bec_key)
         if polarizability_key is not None and polarizability_key in atoms.info:
             atoms.info['y_polarizability'] = atoms.info.pop(polarizability_key)
+        if polarization_key is not None and polarization_key in atoms.info:
+            atoms.info['y_polarization'] = atoms.info.pop(polarization_key)
 
     return atoms_list
 
@@ -397,6 +407,7 @@ def ase_reader(
     stress_key: Optional[str] = None,
     bec_key: Optional[str] = None,
     polarizability_key: Optional[str] = None,
+    polarization_key: Optional[str] = None,
     index: str = ':',
     **kwargs,
 ) -> List[ase.Atoms]:
@@ -408,7 +419,13 @@ def ase_reader(
         atoms_list = [atoms_list]
 
     return _set_atoms_y(
-        atoms_list, energy_key, force_key, stress_key, bec_key, polarizability_key
+        atoms_list,
+        energy_key,
+        force_key,
+        stress_key,
+        bec_key,
+        polarizability_key,
+        polarization_key,
     )
 
 
