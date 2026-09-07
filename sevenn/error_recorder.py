@@ -14,7 +14,7 @@ import torch
 import torch.distributed as dist
 
 import sevenn._keys as KEY
-from sevenn.train.loss import LossDefinition
+from sevenn.train.loss import LossDefinition, fold_polarization_difference
 
 from .train.optim import loss_dict
 
@@ -235,6 +235,41 @@ class RMSError(ErrorMetric):
 
     def get(self) -> float:
         return self.value.get() ** 0.5
+
+
+class FoldedRMSError(RMSError):
+    """RMSE of a polarization, measured after folding onto the polarization
+    lattice.
+
+    The loss folds (``PolarizationLoss``), so the metric must fold too or the
+    two disagree about what is being optimised. Concretely: |P| in the BaTiO3
+    set spans 0.0009-0.0049 e/Ang^2 while one lattice quantum is 0.0065-0.0071,
+    so an unfolded metric is dominated by branch choice and sits near a constant
+    ~0.027 however well the model fits -- exactly what the first BaTiO3 run
+    reported for 1000 epochs.
+
+    ``_retrieve`` is deliberately NOT used here. It drops unlabeled entries
+    before returning, and it does so element-wise on a flattened tensor, so a
+    batch mixing MP-Ferroelectrics (has P) with MP-Dielectrics (does not) comes
+    back with fewer rows than the batch has graphs -- while the cell still has
+    one per graph. Folding then pairs polarizations with the wrong lattices, or
+    dies outright on the shape mismatch. So read the raw tensors, fold against
+    the full-batch cell, and mask afterwards.
+    """
+
+    def update(
+        self, output: 'AtomGraphData', model: Optional[Callable] = None
+    ) -> None:
+        ref = output[self.ref_key].reshape(-1, 3) * self.coeff
+        pred = output[self.pred_key].reshape(-1, 3) * self.coeff
+        folded = fold_polarization_difference(pred, ref, output[KEY.CELL])
+        if self.ignore_unlabeled:
+            # Labels are all-or-nothing per graph, so masking whole rows is the
+            # same set _retrieve would have dropped, minus the flattening.
+            folded = folded[~torch.isnan(ref).any(dim=1)]
+        if folded.numel() == 0:
+            return
+        self.value.update(folded.pow(2).sum(dim=1))
 
 
 class ComponentRMSError(ErrorMetric):
@@ -624,6 +659,14 @@ class ErrorRecorder:
                 continue
             metric_cls = ErrorRecorder.METRIC_DICT[metric_name]
             assert isinstance(metric_kwargs['name'], str)
+            if metric_kwargs['name'] == 'Polarization' and metric_name == 'RMSE':
+                # Polarization is only defined modulo the polarization lattice,
+                # so a raw RMSE measures branch choice as much as accuracy. Swap
+                # in the folded metric rather than adding a config key nobody
+                # would know to set -- an unfolded polarization RMSE is never the
+                # number anyone wants, and this keeps it in step with
+                # PolarizationLoss, which always folds.
+                metric_cls = FoldedRMSError
             if metric_name == 'Loss':
                 if loss_functions is not None:
                     metric_cls = LossError

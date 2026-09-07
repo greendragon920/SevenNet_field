@@ -310,6 +310,57 @@ class PolarizabilityLoss(_CartesianTensorLoss):
         )
 
 
+_POLARIZATION_LATTICE_NEIGHBOURS = [
+    [i, j, k] for i in (-1, 0, 1) for j in (-1, 0, 1) for k in (-1, 0, 1)
+]
+
+
+def fold_polarization_difference(
+    pred: torch.Tensor, ref: torch.Tensor, cell: torch.Tensor
+) -> torch.Tensor:
+    """Return ``pred - ref`` reduced onto the shortest branch of the
+    polarization lattice, shape (n, 3).
+
+    Berry-phase polarization is defined only modulo the polarization lattice
+    ``Q = cell / |Omega|``: every reference value sits on whichever branch its
+    own calculation happened to pick, while the model's P, being a derivative
+    of a short-ranged scalar, is single-valued. Differencing them directly
+    charges the model for a branch choice it cannot know.
+
+    That is not a small correction here. In the BaTiO3 set the quantum is
+    |Q| = 0.0065-0.0071 e/Ang^2 while |P| itself only spans 0.0009-0.0049, so
+    the ambiguity is the size of the whole signal. Folding the 60 most
+    structurally similar frame pairs lifts corr(RMSD, |dP|) from 0.37 to 0.60 --
+    folding is what makes P a function of structure at all.
+
+    Follows MACE-Field's recipe (SI, "Polarisation folding for general cells"):
+    solve ``Q^T c^T = dP^T``, take ``n* = argmin_n ||(c - n) Q||``, return
+    ``(c - n*) Q``. Rows whose reference is NaN come back NaN, so the caller's
+    unlabeled mask still applies.
+    """
+    pred = pred.reshape(-1, 3)
+    ref = ref.reshape(-1, 3)
+    cell = cell.reshape(-1, 3, 3)
+
+    vol = torch.det(cell).abs().clamp_min(1e-8)
+    Q = cell / vol.view(-1, 1, 1)                    # (n, 3, 3), rows a_i/|Omega|
+
+    d = (pred - ref).unsqueeze(-1)                   # (n, 3, 1)
+    c = torch.linalg.solve(Q.transpose(1, 2), d).squeeze(-1)   # dP = c @ Q
+
+    # round(c) is the closest lattice point for an orthogonal cell but not for a
+    # skewed one, so search the 27 points around it rather than trusting the
+    # rounding. Beyond that window the candidates are strictly farther for any
+    # cell this code will meet.
+    nb = torch.tensor(
+        _POLARIZATION_LATTICE_NEIGHBOURS, device=c.device, dtype=c.dtype
+    )
+    cand = (c - torch.round(c)).unsqueeze(1) - nb.unsqueeze(0)   # (n, 27, 3)
+    vecs = torch.einsum('nkj,njm->nkm', cand, Q)                 # (n, 27, 3)
+    best = vecs.norm(dim=-1).argmin(dim=1)
+    return vecs[torch.arange(vecs.shape[0], device=c.device), best]
+
+
 class PolarizationLoss(_CartesianTensorLoss):
     """
     Loss for the polarization P = -dF/dE / volume, per graph, in e/Angstrom^2.
@@ -326,14 +377,38 @@ class PolarizationLoss(_CartesianTensorLoss):
     dataset along a distortion path supervises the same weights across many
     geometries of the same material. That is the gap MP-Ferroelectrics fills.
 
-    Berry-phase P is multivalued modulo the polarization lattice, so a plain
-    componentwise difference is only meaningful if every reference frame happens
-    to sit on one common branch. Nothing here checks that, and the next commit
-    stops assuming it.
+    The difference is folded onto the polarization lattice before the criterion
+    sees it -- see ``fold_polarization_difference``. Checking that a source's
+    labels vary smoothly WITHIN a branch does not establish that every frame
+    shares ONE branch, and on BaTiO3 they do not; folding removes the
+    distinction and is correct either way, so it is applied unconditionally.
+
+    Note that the reported ``Polarization_RMSE`` metric folds too
+    (``error_recorder.FoldedRMSError``). An unfolded metric on a folded loss
+    would report a constant ~0.027 no matter how well training went.
     """
 
     n_component = 3
     is_per_atom = False
+
+    def _preprocess(
+        self, batch_data: Dict[str, Any], model: Optional[Callable] = None
+    ) -> Tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor]]:
+        assert isinstance(self.pred_key, str) and isinstance(self.ref_key, str)
+        ref = batch_data[self.ref_key].reshape(-1, 3)
+        folded = fold_polarization_difference(
+            batch_data[self.pred_key], ref, batch_data[KEY.CELL]
+        )
+
+        w_tensor = None
+        if self.use_weight:
+            weight = batch_data[KEY.DATA_WEIGHT][self.name.lower()]
+            w_tensor = torch.repeat_interleave(weight, self.n_component)
+
+        # Hand the criterion a pair whose difference is already folded, so the
+        # rest of the base class -- flattening, NaN masking, L2MAE's per-tensor
+        # norm -- carries over unchanged.
+        return (ref + folded).reshape(-1), ref.reshape(-1), w_tensor
 
     def __init__(
         self,

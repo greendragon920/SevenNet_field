@@ -122,9 +122,14 @@ def unlabeled_atoms_to_graph(
         KEY.NUM_ATOMS: _correct_scalar(len(atomic_numbers)),
     }
 
+    # The cell rides along unconditionally, not just under with_shift. The
+    # polarization loss folds onto the polarization lattice cell/|Omega| and so
+    # needs the lattice vectors, which nothing else on the graph carries --
+    # edge_vec and cell_volume between them do not determine the cell. Nine
+    # floats per graph against edge_vec's thousands, so the cost is noise.
+    data[KEY.CELL] = cell
     if with_shift:
         data[KEY.CELL_SHIFT] = shift
-        data[KEY.CELL] = cell
     data[KEY.INFO] = {}
     return data
 
@@ -227,9 +232,14 @@ def atoms_to_graph(
     # per graph, stored as (1, 3) so PyG collation yields (n_graph, 3)
     data[KEY.POLARIZATION] = np.asarray(y_pol, dtype=float).reshape(1, 3)
 
+    # The cell rides along unconditionally, not just under with_shift. The
+    # polarization loss folds onto the polarization lattice cell/|Omega| and so
+    # needs the lattice vectors, which nothing else on the graph carries --
+    # edge_vec and cell_volume between them do not determine the cell. Nine
+    # floats per graph against edge_vec's thousands, so the cost is noise.
+    data[KEY.CELL] = cell
     if with_shift:
         data[KEY.CELL_SHIFT] = shift
-        data[KEY.CELL] = cell
 
     if transfer_info and atoms.info is not None:
         info = copy.deepcopy(atoms.info)
