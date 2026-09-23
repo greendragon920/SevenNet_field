@@ -1,5 +1,6 @@
 import copy
 import os.path
+import warnings
 from functools import partial
 from itertools import chain, islice
 from typing import Callable, Dict, List, Optional
@@ -23,7 +24,7 @@ from braceexpand import braceexpand
 from tqdm import tqdm
 
 import sevenn._keys as KEY
-from sevenn._const import LossType
+from sevenn._const import DEFAULT_DATA_WEIGHT, LossType
 from sevenn.atom_graph_data import AtomGraphData
 
 from .dataset import AtomGraphDataset
@@ -99,6 +100,12 @@ def _correct_scalar(v):
         assert False, f'{type(v)} is not expected'
 
 
+def _electric_field_of(atoms: ase.Atoms) -> np.ndarray:
+    # per graph, defaults to zero so that a field free run is unchanged
+    e_field = atoms.info.get('electric_field', np.zeros(3))
+    return np.asarray(e_field, dtype=float).reshape(1, 3)
+
+
 def unlabeled_atoms_to_graph(
     atoms: ase.Atoms, cutoff: float, with_shift: bool = False
 ):
@@ -122,12 +129,10 @@ def unlabeled_atoms_to_graph(
         KEY.NUM_ATOMS: _correct_scalar(len(atomic_numbers)),
     }
 
-    # The cell rides along unconditionally, not just under with_shift. The
-    # polarization loss folds onto the polarization lattice cell/|Omega| and so
-    # needs the lattice vectors, which nothing else on the graph carries --
-    # edge_vec and cell_volume between them do not determine the cell. Nine
-    # floats per graph against edge_vec's thousands, so the cost is noise.
+    # stored unconditionally for the polarization loss, which folds onto
+    # the lattice cell/|Omega|
     data[KEY.CELL] = cell
+    data[KEY.ELECTRIC_FIELD] = _electric_field_of(atoms)
     if with_shift:
         data[KEY.CELL_SHIFT] = shift
     data[KEY.INFO] = {}
@@ -185,6 +190,24 @@ def atoms_to_graph(
         y_stress = from_calc['stress']
     assert y_stress.shape == (6,), 'If you see this, please raise a issue'
 
+    # field response labels have no ASE calculator equivalent
+    y_bec = np.asarray(
+        atoms.arrays.get('y_bec', np.full((len(atoms), 3, 3), np.nan)),
+        dtype=float,
+    )
+    # backward compat: 'y_polarizability' was the old name
+    y_chi = np.asarray(
+        atoms.info.get(
+            'y_susceptibility',
+            atoms.info.get('y_polarizability', np.full((3, 3), np.nan)),
+        ),
+        dtype=float,
+    )
+    y_pol = np.asarray(
+        atoms.info.get('y_polarization', np.full((3,), np.nan)), dtype=float
+    )
+    e_field = _electric_field_of(atoms)
+
     if not allow_unlabeled and (np.isnan(y_energy) or np.isnan(y_force).any()):
         raise ValueError('Unlabeled E or F found, set allow_unlabeled True')
 
@@ -206,37 +229,17 @@ def atoms_to_graph(
         KEY.ENERGY: _correct_scalar(y_energy),
         KEY.FORCE: y_force,
         KEY.STRESS: y_stress.reshape(1, 6),  # to make batch have (n_node, 6)
+        KEY.BEC: y_bec.reshape(-1, 3, 3),
+        KEY.SUSCEPTIBILITY: y_chi.reshape(1, 3, 3),
+        KEY.POLARIZATION: y_pol.reshape(1, 3),
+        KEY.ELECTRIC_FIELD: e_field,
         KEY.CELL_VOLUME: _correct_scalar(atoms.cell.volume),
         KEY.NUM_ATOMS: _correct_scalar(len(atomic_numbers)),
         KEY.PER_ATOM_ENERGY: _correct_scalar(y_energy / len(pos)),
     }
 
-    # ~~ electric field response labels (see README_FIELD.md) ~~ #
-    # Both are Cartesian, matching what FieldResponseOutput predicts directly,
-    # so no irreps conversion is needed anywhere. NaN means "unlabeled" and is
-    # dropped by LossDefinition._ignore_unlabeled.
-    y_bec = atoms.arrays.get('y_bec')
-    if y_bec is None:
-        y_bec = np.full((len(atomic_numbers), 3, 3), np.nan)
-    data[KEY.BEC] = np.asarray(y_bec, dtype=float).reshape(-1, 3, 3)
-
-    y_chi = atoms.info.get('y_polarizability')
-    if y_chi is None:
-        y_chi = np.full((3, 3), np.nan)
-    # per graph, stored as (1, 3, 3) so PyG collation yields (n_graph, 3, 3)
-    data[KEY.POLARIZABILITY] = np.asarray(y_chi, dtype=float).reshape(1, 3, 3)
-
-    y_pol = atoms.info.get('y_polarization')
-    if y_pol is None:
-        y_pol = np.full(3, np.nan)
-    # per graph, stored as (1, 3) so PyG collation yields (n_graph, 3)
-    data[KEY.POLARIZATION] = np.asarray(y_pol, dtype=float).reshape(1, 3)
-
-    # The cell rides along unconditionally, not just under with_shift. The
-    # polarization loss folds onto the polarization lattice cell/|Omega| and so
-    # needs the lattice vectors, which nothing else on the graph carries --
-    # edge_vec and cell_volume between them do not determine the cell. Nine
-    # floats per graph against edge_vec's thousands, so the cost is noise.
+    # stored unconditionally for the polarization loss, which folds onto
+    # the lattice cell/|Omega|
     data[KEY.CELL] = cell
     if with_shift:
         data[KEY.CELL_SHIFT] = shift
@@ -247,6 +250,7 @@ def atoms_to_graph(
         info.pop('y_energy', None)
         info.pop('y_force', None)
         info.pop('y_stress', None)
+        info.pop('y_susceptibility', None)
         info.pop('y_polarizability', None)
         info.pop('y_polarization', None)
         data[KEY.INFO] = info
@@ -336,8 +340,9 @@ def _set_atoms_y(
     force_key: Optional[str] = None,
     stress_key: Optional[str] = None,
     bec_key: Optional[str] = None,
-    polarizability_key: Optional[str] = None,
+    susceptibility_key: Optional[str] = None,
     polarization_key: Optional[str] = None,
+    electric_field_key: Optional[str] = None,
 ) -> List[ase.Atoms]:
     """
     Define how SevenNet reads ASE.atoms object for its y label
@@ -376,36 +381,19 @@ def _set_atoms_y(
             atoms.arrays['y_force'] = from_calc['force']
 
         if stress_key is not None:
-            y_stress = -1 * np.asarray(atoms.info.pop(stress_key), dtype=float)
-            if y_stress.size == 9:
-                # Full 3x3 (or its flattened form), as MP-Dielectrics writes it.
-                # The Voigt reindex below assumes an already-Voigt-6 vector and
-                # would silently scramble a 9-value tensor into
-                # (xx, xy, xz, yz, yy, yx), so extract Voigt order explicitly.
-                m = y_stress.reshape(3, 3)
-                y_stress = np.array(
-                    [m[0, 0], m[1, 1], m[2, 2], m[1, 2], m[0, 2], m[0, 1]]
-                )
-            else:
-                y_stress = y_stress[[0, 1, 2, 5, 3, 4]]
-            atoms.info['y_stress'] = np.array(y_stress)
+            y_stress = -1 * atoms.info.pop(stress_key)
+            atoms.info['y_stress'] = np.array(y_stress[[0, 1, 2, 5, 3, 4]])
         else:
             atoms.info['y_stress'] = from_calc['stress']
 
-        # Field-response labels. Unlike E/F/S these have no ASE calculator
-        # equivalent, so they are read from arrays/info only and simply stay
-        # absent (-> NaN -> ignored by the loss) when not given.
-        # The key may be absent on individual structures: a replay set of
-        # energies/forces/stresses mixed into the same training run carries no
-        # field labels. Those become NaN in atoms_to_graph and are dropped by
-        # LossDefinition._ignore_unlabeled, which is how per-task masking of
-        # heterogeneous labels works. So missing is normal, not an error.
-        if bec_key is not None and bec_key in atoms.arrays:
+        if bec_key is not None:
             atoms.arrays['y_bec'] = atoms.arrays.pop(bec_key)
-        if polarizability_key is not None and polarizability_key in atoms.info:
-            atoms.info['y_polarizability'] = atoms.info.pop(polarizability_key)
-        if polarization_key is not None and polarization_key in atoms.info:
+        if susceptibility_key is not None:
+            atoms.info['y_susceptibility'] = atoms.info.pop(susceptibility_key)
+        if polarization_key is not None:
             atoms.info['y_polarization'] = atoms.info.pop(polarization_key)
+        if electric_field_key is not None:
+            atoms.info['electric_field'] = atoms.info.pop(electric_field_key)
 
     return atoms_list
 
@@ -416,14 +404,23 @@ def ase_reader(
     force_key: Optional[str] = None,
     stress_key: Optional[str] = None,
     bec_key: Optional[str] = None,
-    polarizability_key: Optional[str] = None,
+    susceptibility_key: Optional[str] = None,
     polarization_key: Optional[str] = None,
+    electric_field_key: Optional[str] = None,
     index: str = ':',
+    polarizability_key: Optional[str] = None,  # backward compat
     **kwargs,
 ) -> List[ase.Atoms]:
     """
     Wrapper of ase.io.read
     """
+    if polarizability_key is not None:
+        warnings.warn(
+            "'polarizability_key' is deprecated. Please use"
+            " 'susceptibility_key'.",
+            UserWarning,
+        )
+        susceptibility_key = susceptibility_key or polarizability_key
     atoms_list = ase.io.read(filename, index=index, **kwargs)
     if not isinstance(atoms_list, list):
         atoms_list = [atoms_list]
@@ -434,8 +431,9 @@ def ase_reader(
         force_key,
         stress_key,
         bec_key,
-        polarizability_key,
+        susceptibility_key,
         polarization_key,
+        electric_field_key,
     )
 
 
@@ -556,12 +554,7 @@ def dict_reader(data_dict: Dict):
     if file_list is None:
         raise KeyError('file_list is not found')
 
-    data_weight_default = {
-        'energy': 1.0,
-        'force': 1.0,
-        'stress': 1.0,
-    }
-    data_weight = data_weight_default.copy()
+    data_weight = DEFAULT_DATA_WEIGHT.copy()
     data_weight.update(data_dict_cp.pop(KEY.DATA_WEIGHT, {}))
 
     for file_dct in file_list:

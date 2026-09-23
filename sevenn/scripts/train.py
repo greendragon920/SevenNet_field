@@ -106,16 +106,8 @@ def freeze_backbone_for_field_training(model, config, log) -> None:
     """
     Train only the electric-field injection modules, freezing everything else.
 
-    Intended for making a pretrained checkpoint field-aware without risking its
-    energy/force/stress accuracy (README_FIELD.md). Trainer builds its optimizer
-    from ``[p for p in model.parameters() if p.requires_grad]``, so flipping the
-    flags before the Trainer exists is all that is needed.
-
-    Note the energy/force/stress losses become dead weight under this setting:
-    at E = 0 the field term is identically zero, so those predictions do not
-    depend on the field weights at all and their gradient is exactly zero. Their
-    reported RMSE should stay perfectly flat, which doubles as a check that the
-    freeze took effect.
+    Trainer builds its optimizer from the parameters with requires_grad, so the
+    flags only have to be flipped before the Trainer exists.
     """
     if not config.get(KEY.FREEZE_EXCEPT_FIELD, False):
         return

@@ -1,3 +1,4 @@
+import math
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import torch
@@ -206,62 +207,14 @@ class StressLoss(LossDefinition):
         return pred, ref, w_tensor
 
 
-class _CartesianTensorLoss(LossDefinition):
+class BECLoss(LossDefinition):
     """
-    Loss for a 3x3 Cartesian tensor target, per atom or per graph.
-
-    Both field-response predictions are already Cartesian -- Z* comes out of
-    ``d(dipole_a)/dr_ib`` and chi out of ``d(dipole_a)/dE_b`` -- so unlike
-    SevenNet-Polar, which emits BEC in irreps form and has to round-trip the
-    reference through ``e3nn.io.CartesianTensor``, the reference and prediction
-    are directly comparable. The base ``_preprocess`` flattening is all we need.
-
-    ``get_loss`` is scaled by 9 because flattening divides the mean by 9*N
-    instead of N, which would otherwise shrink these gradients ninefold
-    relative to the energy/force terms.
+    Loss for Born effective charges, Z*_{i,ab} = d(dipole_a)/dr_{ib}, per atom
     """
-
-    n_component = 9
-
-    def _preprocess(
-        self, batch_data: Dict[str, Any], model: Optional[Callable] = None
-    ) -> Tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor]]:
-        assert isinstance(self.pred_key, str) and isinstance(self.ref_key, str)
-
-        pred = torch.reshape(batch_data[self.pred_key], (-1,))
-        ref = torch.reshape(batch_data[self.ref_key], (-1,))
-        w_tensor = None
-
-        if self.use_weight:
-            weight = batch_data[KEY.DATA_WEIGHT][self.name.lower()]
-            if self.is_per_atom:
-                weight = weight[batch_data[KEY.BATCH]]
-            w_tensor = torch.repeat_interleave(weight, self.n_component)
-
-        return pred, ref, w_tensor
-
-    def get_loss(self, batch_data: Dict[str, Any], model: Optional[Callable] = None):
-        loss = super().get_loss(batch_data, model)
-        # The x9 undoes the componentwise mean that flattening introduces, so
-        # the weight refers to a whole tensor rather than one component. L2MAE
-        # already reduces per tensor (it takes the norm over the 9 components),
-        # so applying it there would count the same factor twice.
-        from sevenn.train.optim import L2MAE
-        if isinstance(self.criterion, L2MAE):
-            return loss
-        return loss * float(self.n_component)
-
-
-class BECLoss(_CartesianTensorLoss):
-    """
-    Loss for Born effective charges, Z*_{i,ab} = d(dipole_a)/dr_{ib}, per atom.
-    """
-
-    is_per_atom = True
 
     def __init__(
         self,
-        name: str = 'BornEffectiveCharges',
+        name: str = 'BEC',
         unit: str = 'e',
         criterion: Optional[Callable] = None,
         ref_key: str = KEY.BEC,
@@ -277,27 +230,35 @@ class BECLoss(_CartesianTensorLoss):
             **kwargs,
         )
 
+    def _preprocess(
+        self, batch_data: Dict[str, Any], model: Optional[Callable] = None
+    ) -> Tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor]]:
+        assert isinstance(self.pred_key, str) and isinstance(self.ref_key, str)
+        pred = torch.reshape(batch_data[self.pred_key], (-1,))
+        ref = torch.reshape(batch_data[self.ref_key], (-1,))
+        w_tensor = None
 
-class PolarizabilityLoss(_CartesianTensorLoss):
+        if self.use_weight:
+            loss_type = self.name.lower()
+            weight = batch_data[KEY.DATA_WEIGHT][loss_type]
+            w_tensor = weight[batch_data[KEY.BATCH]]
+            w_tensor = torch.repeat_interleave(w_tensor, 9)
+
+        return pred, ref, w_tensor
+
+
+class SusceptibilityLoss(LossDefinition):
     """
-    Loss for the electronic polarizability chi = eps_inf - 1, per graph.
-
-    The model's chi is symmetric by construction (Maxwell reciprocity), while
-    the MP-Dielectrics labels are only symmetric to ~7e-2. That antisymmetric
-    part is unfittable by design; it sets a floor on the achievable RMSE rather
-    than a bias, since a symmetric prediction is the least-squares optimum for
-    an almost-symmetric target.
+    Loss for the electronic susceptibility chi = eps_inf - 1, per graph
     """
-
-    is_per_atom = False
 
     def __init__(
         self,
-        name: str = 'Polarizability',
+        name: str = 'Susceptibility',
         unit: str = '',
         criterion: Optional[Callable] = None,
-        ref_key: str = KEY.POLARIZABILITY,
-        pred_key: str = KEY.PRED_POLARIZABILITY,
+        ref_key: str = KEY.SUSCEPTIBILITY,
+        pred_key: str = KEY.PRED_SUSCEPTIBILITY,
         **kwargs,
     ) -> None:
         super().__init__(
@@ -309,106 +270,104 @@ class PolarizabilityLoss(_CartesianTensorLoss):
             **kwargs,
         )
 
+    def _preprocess(
+        self, batch_data: Dict[str, Any], model: Optional[Callable] = None
+    ) -> Tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor]]:
+        assert isinstance(self.pred_key, str) and isinstance(self.ref_key, str)
+        pred = torch.reshape(batch_data[self.pred_key], (-1,))
+        ref = torch.reshape(batch_data[self.ref_key], (-1,))
+        w_tensor = None
 
-_POLARIZATION_LATTICE_NEIGHBOURS = [
-    [i, j, k] for i in (-1, 0, 1) for j in (-1, 0, 1) for k in (-1, 0, 1)
-]
+        if self.use_weight:
+            loss_type = self.name.lower()
+            weight = batch_data[KEY.DATA_WEIGHT][loss_type]
+            w_tensor = torch.repeat_interleave(weight, 9)
+
+        return pred, ref, w_tensor
+
+
+def _closest_lattice_shift(c: torch.Tensor, Q: torch.Tensor) -> torch.Tensor:
+    """Integer n minimizing ``||(c - n) Q||``, one row at a time.
+
+    Rounding c is only the nearest lattice point for a well conditioned cell,
+    so the basis is triangularised with QR and searched depth first, pruning
+    any branch already longer than the best found. The result is exact for any
+    full rank cell. The shift is an integer and carries no gradient, so the
+    search runs detached and the caller applies it with tensor ops.
+    """
+    c_cpu = c.detach().double().cpu()
+    Q_cpu = Q.detach().double().cpu()
+    shifts = torch.zeros_like(c_cpu)
+
+    for i in range(c_cpu.shape[0]):
+        if not torch.isfinite(c_cpu[i]).all():
+            continue  # unlabeled row, the caller drops it anyway
+        r = torch.linalg.qr(Q_cpu[i].transpose(0, 1).contiguous())
+        y = r.Q.transpose(0, 1) @ (c_cpu[i] @ Q_cpu[i])
+        rr = r.R
+        sign = torch.where(torch.diagonal(rr) < 0, -1.0, 1.0)
+        rr, y = sign.unsqueeze(-1) * rr, sign * y
+
+        cur = [0, 0, 0]
+        for level in range(2, -1, -1):
+            off = sum(float(rr[level, j]) * cur[j] for j in range(level + 1, 3))
+            cur[level] = round((float(y[level]) - off) / float(rr[level, level]))
+        best = list(cur)
+        resid = rr @ torch.tensor(best, dtype=rr.dtype) - y
+        best_sq = float(resid @ resid)
+
+        def search(level, dist_sq, cur=cur):
+            nonlocal best, best_sq
+            if level < 0:
+                best, best_sq = list(cur), dist_sq
+                return
+            diag = float(rr[level, level])
+            off = sum(float(rr[level, j]) * cur[j] for j in range(level + 1, 3))
+            center = (float(y[level]) - off) / diag
+            radius = math.sqrt(max(best_sq - dist_sq, 0.0)) / abs(diag)
+            lo, hi = math.ceil(center - radius), math.floor(center + radius)
+            for z in sorted(range(lo, hi + 1), key=lambda v: abs(v - center)):
+                step = diag * z + off - float(y[level])
+                nxt = dist_sq + step * step
+                if nxt <= best_sq:
+                    cur[level] = z
+                    search(level - 1, nxt)
+            cur[level] = 0
+
+        search(2, 0.0)
+        shifts[i] = torch.tensor(best, dtype=c_cpu.dtype)
+
+    return shifts.to(device=c.device, dtype=c.dtype)
 
 
 def fold_polarization_difference(
     pred: torch.Tensor, ref: torch.Tensor, cell: torch.Tensor
 ) -> torch.Tensor:
     """Return ``pred - ref`` reduced onto the shortest branch of the
-    polarization lattice, shape (n, 3).
+    polarization lattice ``Q = cell / |Omega|``, shape (n, 3).
 
-    Berry-phase polarization is defined only modulo the polarization lattice
-    ``Q = cell / |Omega|``: every reference value sits on whichever branch its
-    own calculation happened to pick, while the model's P, being a derivative
-    of a short-ranged scalar, is single-valued. Differencing them directly
-    charges the model for a branch choice it cannot know.
-
-    That is not a small correction here. In the BaTiO3 set the quantum is
-    |Q| = 0.0065-0.0071 e/Ang^2 while |P| itself only spans 0.0009-0.0049, so
-    the ambiguity is the size of the whole signal. Folding the 60 most
-    structurally similar frame pairs lifts corr(RMSD, |dP|) from 0.37 to 0.60 --
-    folding is what makes P a function of structure at all.
-
-    Follows MACE-Field's recipe (SI, "Polarisation folding for general cells"):
-    solve ``Q^T c^T = dP^T``, take ``n* = argmin_n ||(c - n) Q||``, return
-    ``(c - n*) Q``. Rows whose reference is NaN come back NaN, so the caller's
-    unlabeled mask still applies.
+    Rows whose reference is NaN come back NaN.
     """
     pred = pred.reshape(-1, 3)
     ref = ref.reshape(-1, 3)
     cell = cell.reshape(-1, 3, 3)
 
     vol = torch.det(cell).abs().clamp_min(1e-8)
-    Q = cell / vol.view(-1, 1, 1)                    # (n, 3, 3), rows a_i/|Omega|
+    Q = cell / vol.view(-1, 1, 1)  # rows are the lattice vectors over |Omega|
 
-    d = (pred - ref).unsqueeze(-1)                   # (n, 3, 1)
-    c = torch.linalg.solve(Q.transpose(1, 2), d).squeeze(-1)   # dP = c @ Q
-
-    # round(c) is the closest lattice point for an orthogonal cell but not for a
-    # skewed one, so search the 27 points around it rather than trusting the
-    # rounding. Beyond that window the candidates are strictly farther for any
-    # cell this code will meet.
-    nb = torch.tensor(
-        _POLARIZATION_LATTICE_NEIGHBOURS, device=c.device, dtype=c.dtype
-    )
-    cand = (c - torch.round(c)).unsqueeze(1) - nb.unsqueeze(0)   # (n, 27, 3)
-    vecs = torch.einsum('nkj,njm->nkm', cand, Q)                 # (n, 27, 3)
-    best = vecs.norm(dim=-1).argmin(dim=1)
-    return vecs[torch.arange(vecs.shape[0], device=c.device), best]
+    d = pred - ref
+    c = torch.linalg.solve(Q.transpose(1, 2), d.unsqueeze(-1)).squeeze(-1)
+    shift = _closest_lattice_shift(c, Q)
+    return d - torch.einsum('ni,nij->nj', shift, Q)
 
 
-class PolarizationLoss(_CartesianTensorLoss):
+class PolarizationLoss(LossDefinition):
     """
-    Loss for the polarization P = -dF/dE / volume, per graph, in e/Angstrom^2.
-
-    P is a rank-1 target, so n_component is 3 rather than 9; the base class is
-    otherwise unchanged, since its flattening and per-tensor weighting do not
-    care about the rank.
-
-    Why this matters beyond adding a target: P is the FIRST derivative of the
-    electric enthalpy with respect to E, so it trains exactly the Y_1 field
-    weights that Z* = d(dipole)/dr does -- chi, the second derivative, trains
-    the Y_2 weights instead and is disjoint from both. A BEC-only dataset
-    therefore supervises Y_1 at one geometry per material, while a polarization
-    dataset along a distortion path supervises the same weights across many
-    geometries of the same material. That is the gap MP-Ferroelectrics fills.
+    Loss for the polarization P = -dF/dE / volume, per graph, in e/Angstrom^2
 
     The difference is folded onto the polarization lattice before the criterion
-    sees it -- see ``fold_polarization_difference``. Checking that a source's
-    labels vary smoothly WITHIN a branch does not establish that every frame
-    shares ONE branch, and on BaTiO3 they do not; folding removes the
-    distinction and is correct either way, so it is applied unconditionally.
-
-    Note that the reported ``Polarization_RMSE`` metric folds too
-    (``error_recorder.FoldedRMSError``). An unfolded metric on a folded loss
-    would report a constant ~0.027 no matter how well training went.
+    sees it; the reported metric folds too.
     """
-
-    n_component = 3
-    is_per_atom = False
-
-    def _preprocess(
-        self, batch_data: Dict[str, Any], model: Optional[Callable] = None
-    ) -> Tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor]]:
-        assert isinstance(self.pred_key, str) and isinstance(self.ref_key, str)
-        ref = batch_data[self.ref_key].reshape(-1, 3)
-        folded = fold_polarization_difference(
-            batch_data[self.pred_key], ref, batch_data[KEY.CELL]
-        )
-
-        w_tensor = None
-        if self.use_weight:
-            weight = batch_data[KEY.DATA_WEIGHT][self.name.lower()]
-            w_tensor = torch.repeat_interleave(weight, self.n_component)
-
-        # Hand the criterion a pair whose difference is already folded, so the
-        # rest of the base class -- flattening, NaN masking, L2MAE's per-tensor
-        # norm -- carries over unchanged.
-        return (ref + folded).reshape(-1), ref.reshape(-1), w_tensor
 
     def __init__(
         self,
@@ -427,6 +386,24 @@ class PolarizationLoss(_CartesianTensorLoss):
             pred_key=pred_key,
             **kwargs,
         )
+
+    def _preprocess(
+        self, batch_data: Dict[str, Any], model: Optional[Callable] = None
+    ) -> Tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor]]:
+        assert isinstance(self.pred_key, str) and isinstance(self.ref_key, str)
+        ref = batch_data[self.ref_key].reshape(-1, 3)
+        folded = fold_polarization_difference(
+            batch_data[self.pred_key], ref, batch_data[KEY.CELL]
+        )
+        w_tensor = None
+
+        if self.use_weight:
+            loss_type = self.name.lower()
+            weight = batch_data[KEY.DATA_WEIGHT][loss_type]
+            w_tensor = torch.repeat_interleave(weight, 3)
+
+        # the criterion gets a pair whose difference is already folded
+        return (ref + folded).reshape(-1), ref.reshape(-1), w_tensor
 
 
 class L2Regularization(LossDefinition):
@@ -518,7 +495,7 @@ def make_loss_info_dict_from_config(config: Dict[str, Any]):
     loss_info_dict = {}
     loss_type = config.get(KEY.LOSS, 'mse').lower()
     loss_param = config.get(KEY.LOSS_PARAM, {})
-    for key in ['energy', 'force', 'stress', 'bec', 'polarizability', 'polarization']:
+    for key in ['energy', 'force', 'stress', 'bec', 'susceptibility', 'polarization']:
         loss_info_dict[key] = {}
         # loss_weight not initialized here.
         loss_info_dict[key].update(
@@ -546,16 +523,16 @@ def get_loss_functions_from_config(
         'force': ForceLoss,
         'stress': StressLoss,
         'bec': BECLoss,
-        'polarizability': PolarizabilityLoss,
+        'susceptibility': SusceptibilityLoss,
         'polarization': PolarizationLoss,
     }
     loss_weights = {
         'energy': config.get(KEY.ENERGY_WEIGHT, 1.0),
         'force': config[KEY.FORCE_WEIGHT],
         'stress': config[KEY.STRESS_WEIGHT],
-        'bec': config.get(KEY.BEC_WEIGHT, 1.0),
-        'polarizability': config.get(KEY.POLARIZABILITY_WEIGHT, 0.15),
-        'polarization': config.get(KEY.POLARIZATION_WEIGHT, 1.0),
+        'bec': config[KEY.BEC_WEIGHT],
+        'susceptibility': config[KEY.SUSCEPTIBILITY_WEIGHT],
+        'polarization': config[KEY.POLARIZATION_WEIGHT],
     }
 
     use_weight = config.get(KEY.USE_WEIGHT, False)
@@ -564,11 +541,11 @@ def get_loss_functions_from_config(
     keys = ['energy', 'force']
     if config[KEY.IS_TRAIN_STRESS]:
         keys += ['stress']
-    if config.get(KEY.IS_TRAIN_BEC, False):
+    if config[KEY.IS_TRAIN_BEC]:
         keys += ['bec']
-    if config.get(KEY.IS_TRAIN_POLARIZABILITY, False):
-        keys += ['polarizability']
-    if config.get(KEY.IS_TRAIN_POLARIZATION, False):
+    if config[KEY.IS_TRAIN_SUSCEPTIBILITY]:
+        keys += ['susceptibility']
+    if config[KEY.IS_TRAIN_POLARIZATION]:
         keys += ['polarization']
 
     for key in keys:

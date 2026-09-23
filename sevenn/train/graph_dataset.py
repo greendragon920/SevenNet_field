@@ -19,7 +19,7 @@ import sevenn._keys as KEY
 import sevenn.train.dataload as dataload
 import sevenn.util as util
 from sevenn import __version__
-from sevenn._const import NUM_UNIV_ELEMENT
+from sevenn._const import DEFAULT_DATA_WEIGHT, NUM_UNIV_ELEMENT
 from sevenn.atom_graph_data import AtomGraphData
 from sevenn.logger import Logger
 
@@ -307,7 +307,7 @@ class SevenNetGraphDataset(InMemoryDataset):
             if self.use_data_weight:
                 # pop data weight from info, and assign to graph
                 weight = data[KEY.INFO].pop(
-                    KEY.DATA_WEIGHT, {'energy': 1.0, 'force': 1.0, 'stress': 1.0}
+                    KEY.DATA_WEIGHT, DEFAULT_DATA_WEIGHT.copy()
                 )
                 data[KEY.DATA_WEIGHT] = weight
             processed_graph_list.append(data)
@@ -489,12 +489,7 @@ class SevenNetGraphDataset(InMemoryDataset):
         if file_list is None:
             raise KeyError('file_list is not found')
 
-        data_weight_default = {
-            'energy': 1.0,
-            'force': 1.0,
-            'stress': 1.0,
-        }
-        data_weight = data_weight_default.copy()
+        data_weight = DEFAULT_DATA_WEIGHT.copy()
         data_weight.update(data_dict_cp.pop(KEY.DATA_WEIGHT, {}))
 
         graph_list = []
@@ -556,7 +551,7 @@ def from_single_path(
     Convenient routine for loading a single .pt dataset.
     If given dict and it has data_weight, apply it using transform
     """
-    data_weight = {'energy': 1.0, 'force': 1.0, 'stress': 1.0}
+    data_weight = DEFAULT_DATA_WEIGHT.copy()
     spath = _extract_single_path(path)
     if spath is None:
         return None

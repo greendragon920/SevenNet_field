@@ -109,14 +109,8 @@ class AtomGraphSequential(nn.Sequential):
 
     @torch.jit.unused
     def set_compute_field_response(self, flag: bool) -> None:
-        """
-        Turn the electric-field derivative machinery on/off.
-
-        Setting the field to zero already makes energy/force/stress identical to
-        the field-free model, but it does not save any compute: the double
-        backward still runs. This is the switch that actually saves it, e.g. for
-        plain MD with a field-aware checkpoint.
-        """
+        # skip the derivatives that give the field response outputs
+        # (dipole, P, Z*, chi)
         module = self._modules.get('field_response')
         if module is not None:
             module.enabled = flag  # type: ignore

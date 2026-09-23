@@ -60,12 +60,8 @@ _ERROR_TYPES = {
         'coeff': 160.21766208,
         'vdim': 6,
     },
-    # ~~ electric field response (see README_FIELD.md) ~~ #
-    # Both predictions are already Cartesian 3x3, so no irreps conversion is
-    # needed here (SevenNet-Polar's equivalent metric has to call
-    # CartesianTensor.to_cartesian on the prediction first).
-    'BornEffectiveCharges': {
-        'name': 'BornEffectiveCharges',
+    'BEC': {
+        'name': 'BEC',
         'ref_key': KEY.BEC,
         'pred_key': KEY.PRED_BEC,
         'unit': 'e',
@@ -78,10 +74,10 @@ _ERROR_TYPES = {
         'unit': 'e/Ang^2',
         'vdim': 3,
     },
-    'Polarizability': {
-        'name': 'Polarizability',
-        'ref_key': KEY.POLARIZABILITY,
-        'pred_key': KEY.PRED_POLARIZABILITY,
+    'Susceptibility': {
+        'name': 'Susceptibility',
+        'ref_key': KEY.SUSCEPTIBILITY,
+        'pred_key': KEY.PRED_SUSCEPTIBILITY,
         'unit': '',
         'vdim': 9,
     },
@@ -113,6 +109,19 @@ def _get_loss_function_from_name(loss_functions, name):
         if loss_def.name.lower() == name.lower():
             return loss_def, w
     return None, None
+
+
+def _untrained_targets(config):
+    untrained = set()
+    for flag, target, on_by_default in (
+        (KEY.IS_TRAIN_STRESS, 'Stress', True),
+        (KEY.IS_TRAIN_BEC, 'BEC', False),
+        (KEY.IS_TRAIN_SUSCEPTIBILITY, 'Susceptibility', False),
+        (KEY.IS_TRAIN_POLARIZATION, 'Polarization', False),
+    ):
+        if not config.get(flag, on_by_default):
+            untrained.add(target)
+    return untrained
 
 
 class AverageNumber:
@@ -238,23 +247,8 @@ class RMSError(ErrorMetric):
 
 
 class FoldedRMSError(RMSError):
-    """RMSE of a polarization, measured after folding onto the polarization
-    lattice.
-
-    The loss folds (``PolarizationLoss``), so the metric must fold too or the
-    two disagree about what is being optimised. Concretely: |P| in the BaTiO3
-    set spans 0.0009-0.0049 e/Ang^2 while one lattice quantum is 0.0065-0.0071,
-    so an unfolded metric is dominated by branch choice and sits near a constant
-    ~0.027 however well the model fits -- exactly what the first BaTiO3 run
-    reported for 1000 epochs.
-
-    ``_retrieve`` is deliberately NOT used here. It drops unlabeled entries
-    before returning, and it does so element-wise on a flattened tensor, so a
-    batch mixing MP-Ferroelectrics (has P) with MP-Dielectrics (does not) comes
-    back with fewer rows than the batch has graphs -- while the cell still has
-    one per graph. Folding then pairs polarizations with the wrong lattices, or
-    dies outright on the shape mismatch. So read the raw tensors, fold against
-    the full-batch cell, and mask afterwards.
+    """
+    Vector squared error, folded onto the polarization lattice
     """
 
     def update(
@@ -264,8 +258,6 @@ class FoldedRMSError(RMSError):
         pred = output[self.pred_key].reshape(-1, 3) * self.coeff
         folded = fold_polarization_difference(pred, ref, output[KEY.CELL])
         if self.ignore_unlabeled:
-            # Labels are all-or-nothing per graph, so masking whole rows is the
-            # same set _retrieve would have dropped, minus the flattening.
             folded = folded[~torch.isnan(ref).any(dim=1)]
         if folded.numel() == 0:
             return
@@ -298,58 +290,6 @@ class ComponentRMSError(ErrorMetric):
 
     def get(self) -> float:
         return self.value.get() ** 0.5
-
-
-class _CartesianTensorRMSError(ErrorMetric):
-    """
-    RMSE over either the diagonal or the off-diagonal of a 3x3 Cartesian target.
-
-    Reported separately because the two differ by roughly an order of magnitude
-    for both field-response targets (on MP-Dielectrics: Z* diagonal std 2.29 vs
-    off-diagonal 0.41; chi diagonal 4.84 vs off-diagonal 0.30), so a pooled
-    RMSE hides all the off-diagonal error.
-
-    Deliberately does not use ``_retrieve``: its unlabeled-NaN masking flattens
-    the tensor, which would leave nothing to identify the diagonal by. Masking
-    happens here, after reshaping.
-    """
-
-    take_diagonal = True
-
-    def __init__(self, vdim: int = 9, **kwargs) -> None:
-        super().__init__(**kwargs)
-        self._se = torch.nn.MSELoss(reduction='none')
-
-    def update(
-        self, output: 'AtomGraphData', model: Optional[Callable] = None
-    ) -> None:
-        y_ref = (output[self.ref_key] * self.coeff).reshape(-1, 3, 3)
-        y_pred = (output[self.pred_key] * self.coeff).reshape(-1, 3, 3)
-
-        mask = torch.eye(3, dtype=torch.bool, device=y_ref.device)
-        if not self.take_diagonal:
-            mask = ~mask
-        y_ref = y_ref[:, mask]
-        y_pred = y_pred[:, mask]
-
-        if self.ignore_unlabeled:
-            labeled = ~torch.isnan(y_ref)
-            y_ref = y_ref[labeled]
-            y_pred = y_pred[labeled]
-        if y_ref.numel() == 0:
-            return
-        self.value.update(self._se(y_ref, y_pred).reshape(-1))
-
-    def get(self) -> float:
-        return self.value.get() ** 0.5
-
-
-class DiagRMSError(_CartesianTensorRMSError):
-    take_diagonal = True
-
-
-class OffDiagRMSError(_CartesianTensorRMSError):
-    take_diagonal = False
 
 
 class MAError(ErrorMetric):
@@ -500,8 +440,6 @@ class ErrorRecorder:
         'ComponentRMSE': ComponentRMSError,
         'MAE': MAError,
         'Loss': LossError,
-        'DiagRMSE': DiagRMSError,
-        'OffDiagRMSE': OffDiagRMSError,
     }
 
     def __init__(self, metrics: List[ErrorMetric]) -> None:
@@ -575,24 +513,21 @@ class ErrorRecorder:
                 stress_metric = CustomError(criteria, **get_err_type('Stress'))
                 metrics.append((stress_metric, config[KEY.STRESS_WEIGHT]))
         else:  # TODO: this is hard-coded
-            names = ['Energy', 'Force']
-            if is_stress:
-                names.append('Stress')
-            # Without these, TotalLoss would omit the field-response targets
-            # entirely -- and since energy/force cannot train while the backbone
-            # is frozen, their weights are typically 0 and TotalLoss would be
-            # identically zero, silently breaking best_metric.
-            if config.get(KEY.IS_TRAIN_BEC, False):
-                names.append('BornEffectiveCharges')
-            if config.get(KEY.IS_TRAIN_POLARIZABILITY, False):
-                names.append('Polarizability')
-            if config.get(KEY.IS_TRAIN_POLARIZATION, False):
-                names.append('Polarization')
-            for efs in names:
-                lf, w = _get_loss_function_from_name(loss_functions, efs)
+            untrained = _untrained_targets(config)
+            for target in [
+                'Energy',
+                'Force',
+                'Stress',
+                'BEC',
+                'Susceptibility',
+                'Polarization',
+            ]:
+                if target in untrained:
+                    continue
+                lf, w = _get_loss_function_from_name(loss_functions, target)
                 if lf is None:
-                    raise ValueError(f'{efs} not found from loss_functions')
-                metric = LossError(loss_def=lf, **get_err_type(efs))
+                    raise ValueError(f'{target} not found from loss_functions')
+                metric = LossError(loss_def=lf, **get_err_type(target))
                 metrics.append((metric, w))
 
         total_loss_metric = CombinedError(
@@ -623,10 +558,11 @@ class ErrorRecorder:
             raise ValueError(
                 'No error_record config found. Consider util.get_error_recorder'
             )
-        err_config_n = []
-        if not config.get(KEY.IS_TRAIN_STRESS, True):
+        untrained = _untrained_targets(config)
+        if untrained:
+            err_config_n = []
             for err_type, metric_name in err_config:
-                if 'Stress' in err_type:
+                if any(target in err_type for target in untrained):
                     continue
                 err_config_n.append((err_type, metric_name))
             err_config = err_config_n
@@ -660,12 +596,6 @@ class ErrorRecorder:
             metric_cls = ErrorRecorder.METRIC_DICT[metric_name]
             assert isinstance(metric_kwargs['name'], str)
             if metric_kwargs['name'] == 'Polarization' and metric_name == 'RMSE':
-                # Polarization is only defined modulo the polarization lattice,
-                # so a raw RMSE measures branch choice as much as accuracy. Swap
-                # in the folded metric rather than adding a config key nobody
-                # would know to set -- an unfolded polarization RMSE is never the
-                # number anyone wants, and this keeps it in step with
-                # PolarizationLoss, which always folds.
                 metric_cls = FoldedRMSError
             if metric_name == 'Loss':
                 if loss_functions is not None:

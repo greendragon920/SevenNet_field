@@ -14,7 +14,7 @@ from tqdm import tqdm
 import sevenn._keys as KEY
 import sevenn.train.dataload as dataload
 import sevenn.util as util
-from sevenn._const import NUM_UNIV_ELEMENT
+from sevenn._const import DEFAULT_DATA_WEIGHT, NUM_UNIV_ELEMENT
 from sevenn.atom_graph_data import AtomGraphData
 
 _warn_avg_num_neigh = """SevenNetAtomsDataset does not provide correct avg_num_neigh
@@ -105,7 +105,7 @@ class SevenNetAtomsDataset(torch.utils.data.Dataset):
 
         if self.use_data_weight:
             weight = graph[KEY.INFO].pop(
-                KEY.DATA_WEIGHT, {'energy': 1.0, 'force': 1.0, 'stress': 1.0}
+                KEY.DATA_WEIGHT, DEFAULT_DATA_WEIGHT.copy()
             )
             graph[KEY.DATA_WEIGHT] = weight
 

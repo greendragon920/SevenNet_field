@@ -117,6 +117,38 @@ def init_train_config(config: Dict[str, Any]) -> Dict[str, Any]:
     train_meta = {}
     # defaults = _const.train_defaults(config)
 
+    # deprecation warnings
+    _renamed = {
+        'is_train_polarizability': KEY.IS_TRAIN_SUSCEPTIBILITY,
+        'polarizability_loss_weight': KEY.SUSCEPTIBILITY_WEIGHT,
+    }
+    for was, now in _renamed.items():
+        if was in config:
+            warnings.warn(
+                f"key '{was}' is deprecated. Please use '{now}'. The target is"
+                ' the susceptibility chi = eps_inf - 1, which is intensive,'
+                ' not the extensive polarizability.',
+                UserWarning,
+            )
+            config[now] = config.pop(was)
+    _renamed_record = {
+        'Polarizability': 'Susceptibility',
+        'BornEffectiveCharges': 'BEC',
+        'DiagRMSE': 'RMSE',
+        'OffDiagRMSE': 'RMSE',
+    }
+    if KEY.ERROR_RECORD in config:
+        for entry in config[KEY.ERROR_RECORD]:
+            for i, was in enumerate(entry):
+                now = _renamed_record.get(was)
+                if now is not None:
+                    warnings.warn(
+                        f"error_record '{was}' is deprecated."
+                        f" Please use '{now}'.",
+                        UserWarning,
+                    )
+                    entry[i] = now
+
     try:
         device_input = config[KEY.DEVICE]
         train_meta[KEY.DEVICE] = torch.device(device_input)

@@ -68,28 +68,19 @@ PRED_STRESS: Final[str] = 'inferred_stress'
 PRED_ATOMIC_VIRIAL: Final[str] = 'inferred_atomic_virial'
 SCALED_STRESS: Final[str] = 'scaled_stress'
 
-# ~~ electric field response (see README_FIELD.md) ~~ #
-# Uniform external electric field, in V/Angstrom. Stored per graph as (1, 3) so
-# that PyG collation yields (n_graph, 3), the same trick STRESS uses.
-ELECTRIC_FIELD: Final[str] = 'electric_field'
+# ~~ electric field response ~~ #
+ELECTRIC_FIELD: Final[str] = 'electric_field'  # (1, 3) per graph, V/Angstrom
+
 # reference labels
-BEC: Final[str] = 'born_effective_charges'  # (N, 3, 3), dimensionless (units of e)
-POLARIZABILITY: Final[str] = 'polarizability'  # (1, 3, 3) per graph, = eps_inf - 1
-# (1, 3) per graph, e/Angstrom^2. Berry-phase polarization, and therefore
-# defined only modulo the polarization lattice cell/|Omega|: a reference value
-# sits on whichever branch its own calculation picked. Do NOT assume a dataset
-# ships one common branch -- measured, MP-Ferroelectrics has 24% of its frames
-# beyond half a quantum and the whole BaTiO3 label range fits inside a single
-# quantum. Losses and metrics on this key must fold; see
-# train/loss.py:fold_polarization_difference.
-# Unlike chi this is a FIRST derivative of F wrt E, so it trains the same Y_1
-# weights Z* does.
-POLARIZATION: Final[str] = 'polarization'
-# predictions, all obtained by differentiating the electric enthalpy
-PRED_POLARIZATION: Final[str] = 'inferred_polarization'  # (n_graph, 3) e/A^2
-PRED_DIPOLE: Final[str] = 'inferred_dipole'  # (n_graph, 3) e*A, = volume * P
-PRED_BEC: Final[str] = 'inferred_born_effective_charges'  # (N, 3, 3)
-PRED_POLARIZABILITY: Final[str] = 'inferred_polarizability'  # (n_graph, 3, 3)
+BEC: Final[str] = 'born_effective_charges'  # (N, 3, 3), units of e
+SUSCEPTIBILITY: Final[str] = 'susceptibility'  # (1, 3, 3), = eps_inf - 1
+POLARIZATION: Final[str] = 'polarization'  # (1, 3), e/Angstrom^2
+
+# predictions
+PRED_POLARIZATION: Final[str] = 'inferred_polarization'
+PRED_DIPOLE: Final[str] = 'inferred_dipole'
+PRED_BEC: Final[str] = 'inferred_born_effective_charges'
+PRED_SUSCEPTIBILITY: Final[str] = 'inferred_susceptibility'
 
 # very general data property for AtomGraphData
 NUM_ATOMS: Final[str] = 'num_atoms'  # int
@@ -150,9 +141,9 @@ SCHEDULER_BATCH_MODE = 'scheduler_batch_mode'
 ENERGY_WEIGHT = 'energy_loss_weight'
 FORCE_WEIGHT = 'force_loss_weight'
 STRESS_WEIGHT = 'stress_loss_weight'
-# ~~ electric field response training (see README_FIELD.md) ~~ #
+# ~~ electric field response training ~~ #
 BEC_WEIGHT = 'bec_loss_weight'
-POLARIZABILITY_WEIGHT = 'polarizability_loss_weight'
+SUSCEPTIBILITY_WEIGHT = 'susceptibility_loss_weight'
 POLARIZATION_WEIGHT = 'polarization_loss_weight'
 GRAD_CLIP = 'grad_clip'
 DEVICE = 'device'
@@ -162,11 +153,8 @@ TRAIN_SHUFFLE = 'train_shuffle'
 
 IS_TRAIN_STRESS = 'is_train_stress'
 IS_TRAIN_BEC = 'is_train_bec'
-IS_TRAIN_POLARIZABILITY = 'is_train_polarizability'
+IS_TRAIN_SUSCEPTIBILITY = 'is_train_susceptibility'
 IS_TRAIN_POLARIZATION = 'is_train_polarization'
-# Freeze every pretrained weight and train only the field-injection modules.
-# The optimizer already filters on requires_grad (train/trainer.py), so this
-# only has to flip the flags before the Trainer is built.
 FREEZE_EXCEPT_FIELD = 'freeze_except_field'
 
 CONTINUE = 'continue'
@@ -282,8 +270,8 @@ USE_OEQ = 'use_oeq'
 
 # ~~ electric field response model configuration ~~ #
 USE_ELECTRIC_FIELD = 'use_electric_field'
-FIELD_LMAX = 'field_lmax'  # highest l of Y_lm(E) used. l=0 is never used.
-FIELD_INJECTION_LAYERS = 'field_injection_layers'  # which conv layers to inject at
+FIELD_LMAX = 'field_lmax'
+FIELD_INJECTION_LAYERS = 'field_injection_layers'
 
 REG_PARAM = 'regularization_param'
 REG_WEIGHT = 'regularization_weight'

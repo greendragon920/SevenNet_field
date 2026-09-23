@@ -12,20 +12,15 @@ class L2MAE(nn.Module):
     L2 norm (Frobenius norm) based MAE loss.
     For stress, norm of 3*3 matrix is used for invariance
 
-    Born effective charges and polarizability are rank-2 Cartesian tensors held
-    as a full 3x3 (9 components), so they take the norm over all 9 directly.
-    Stress is Voigt-6 and needs its three shear components counted twice for
-    the norm to equal the Frobenius norm of the symmetric 3x3, which is what
-    the concatenation below does; a full 3x3 must not be duplicated that way.
+    Rank-2 Cartesian targets are a full 3x3, so the norm covers all 9.
+    Stress is Voigt-6 and duplicates its shear block instead.
     """
 
-    # A prop missing from this map silently falls back to 6 (Voigt stress) and
-    # then dies in view() with a shape error -- add every new target here.
     N_COMPONENT = {
         'force': 3,
         'stress': 6,
         'bec': 9,
-        'polarizability': 9,
+        'susceptibility': 9,
         'polarization': 3,
     }
 
@@ -42,8 +37,7 @@ class L2MAE(nn.Module):
     def forward(self, input, target):
         diff = input.view([-1, self.dim]) - target.view([-1, self.dim])
         if self.dim == 6:
-            # Voigt-6: duplicate the shear block so the norm is the Frobenius
-            # norm of the symmetric 3x3 it represents.
+            # Voigt-6: duplicate the shear block for the Frobenius norm
             diff = torch.cat((diff, diff[:, -3:]), dim=1)
         norm = torch.norm(diff, p=2, dim=-1)
         if self.reduction == 'none':

@@ -2,7 +2,7 @@ import ctypes
 import os
 import pathlib
 import warnings
-from typing import Any, Dict, Optional, Union
+from typing import Any, Dict, Optional, Sequence, Union
 
 import numpy as np
 import torch
@@ -36,6 +36,7 @@ class SevenNetCalculator(Calculator):
         enable_flash: bool = False,
         enable_oeq: bool = False,
         compute_atomic_virial: bool = False,
+        electric_field: Optional[Sequence[float]] = None,
         sevennet_config: Optional[Dict] = None,  # Not used in logic, just meta info
         **kwargs,
     ) -> None:
@@ -72,6 +73,7 @@ class SevenNetCalculator(Calculator):
         super().__init__(**kwargs)
         self.sevennet_config = None
         self.compute_atomic_virial = compute_atomic_virial
+        self.electric_field = electric_field
 
         if isinstance(model, pathlib.PurePath):
             model = str(model)
@@ -227,6 +229,10 @@ class SevenNetCalculator(Calculator):
         )
         if self.modal:
             data[KEY.DATA_MODALITY] = self.modal
+        if self.electric_field is not None:
+            data[KEY.ELECTRIC_FIELD] = torch.tensor(
+                self.electric_field, dtype=torch.get_default_dtype()
+            ).reshape(1, 3)
 
         data.to(self.device)  # type: ignore
 

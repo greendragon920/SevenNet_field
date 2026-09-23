@@ -377,9 +377,7 @@ def patch_electric_field(
                                           for each t in field_injection_layers
       * 'field_response'                  right before 'force_output'
 
-    Every pretrained tensor keeps its shape, so a field-free checkpoint loads
-    with strict=False and only these modules report as missing. See
-    README_FIELD.md.
+    No pretrained tensor changes shape.
     """
     if not config.get(KEY.USE_ELECTRIC_FIELD, False):
         return layers
@@ -710,8 +708,8 @@ def build_E3_equivariant_model(
     if parallel:
         if config.get(KEY.USE_ELECTRIC_FIELD, False):
             raise NotImplementedError(
-                'use_electric_field is not supported for parallel (LAMMPS) models '
-                'yet. See README_FIELD.md.'
+                'use_electric_field is not supported for parallel (LAMMPS) '
+                'models yet.'
             )
         layers_list = _to_parallel_model(layers, config)
         return [
