@@ -118,8 +118,11 @@ def _elemwise_reference_energies(
 ) -> List[float]:
     from sklearn.linear_model import Ridge
 
-    c = composition
-    y = energies
+    labeled = np.isfinite(energies)
+    if not labeled.any():
+        return [float('nan')] * NUM_UNIV_ELEMENT
+    c = composition[labeled]
+    y = energies[labeled]
     zero_indices = np.all(c == 0, axis=0)
     c_reduced = c[:, ~zero_indices]
     # will not 100% reproduce, as it is sorted by Z
@@ -491,6 +494,7 @@ class SevenNetGraphDataset(InMemoryDataset):
 
         data_weight = DEFAULT_DATA_WEIGHT.copy()
         data_weight.update(data_dict_cp.pop(KEY.DATA_WEIGHT, {}))
+        allow_unlabeled = bool(data_dict_cp.pop('allow_unlabeled', False))
 
         graph_list = []
         for file_dct in file_list:
@@ -508,8 +512,14 @@ class SevenNetGraphDataset(InMemoryDataset):
             graph[KEY.INFO].update(data_dict_cp)
             graph[KEY.INFO].update({KEY.DATA_WEIGHT: data_weight})
 
-        atoms_list = dataload.dict_reader(data_dict)
-        graph_list.extend(dataload.graph_build(atoms_list, cutoff, num_cores))
+        atoms_list = dataload.dict_reader(
+            {k: v for k, v in data_dict.items() if k != 'allow_unlabeled'}
+        )
+        graph_list.extend(
+            dataload.graph_build(
+                atoms_list, cutoff, num_cores, allow_unlabeled=allow_unlabeled
+            )
+        )
         return graph_list
 
     @staticmethod
