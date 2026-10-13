@@ -570,7 +570,7 @@ def dict_reader(data_dict: Dict):
     for atoms in ret:
         atoms.info.update(data_dict_cp)
         atoms.info.update({KEY.DATA_WEIGHT: data_weight})
-    return _set_atoms_y(ret)
+    return ret
 
 
 def match_reader(reader_name: str, **kwargs):
