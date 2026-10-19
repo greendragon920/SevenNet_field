@@ -164,8 +164,9 @@ DEFAULT_E3_EQUIVARIANT_MODEL_CONFIG = {
     KEY.CUEQUIVARIANCE_CONFIG: {},
     KEY.USE_OEQ: False,
     KEY.USE_ELECTRIC_FIELD: False,
-    KEY.FIELD_LMAX: 2,
-    KEY.FIELD_INJECTION_LAYERS: [0],
+    KEY.FIELD_ALPHA_VECTORS: 4,
+    KEY.FIELD_HEAD: 'linear',
+    KEY.FIELD_HEAD_HIDDEN: 16,
 }
 
 
@@ -217,10 +218,9 @@ MODEL_CONFIG_CONDITION = {
     KEY.CUEQUIVARIANCE_CONFIG: dict,
     KEY.USE_OEQ: bool,
     KEY.USE_ELECTRIC_FIELD: bool,
-    KEY.FIELD_LMAX: lambda x: isinstance(x, int) and 1 <= x <= 4,
-    KEY.FIELD_INJECTION_LAYERS: lambda x: isinstance(x, list) and all(
-        isinstance(i, int) and i >= 0 for i in x
-    ),
+    KEY.FIELD_ALPHA_VECTORS: lambda x: isinstance(x, int) and x >= 1,
+    KEY.FIELD_HEAD: lambda x: x in ('linear', 'gate', 'bond', 'bond_multi'),
+    KEY.FIELD_HEAD_HIDDEN: lambda x: isinstance(x, int) and x >= 1,
 }
 
 

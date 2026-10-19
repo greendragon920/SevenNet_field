@@ -19,9 +19,12 @@ from .nn.edge_embedding import (
     XPLORCutoff,
 )
 from .nn.field import (
+    FieldFeatureTap,
     ElectricFieldPrepare,
-    ElectricFieldSelfConnection,
-    FieldResponseOutput,
+    FieldBondHeads,
+    FieldEnthalpyOutput,
+    FieldGateHeads,
+    FieldTensorHeads,
 )
 from .nn.force_output import ForceStressOutputFromEdge
 from .nn.interaction_blocks import NequIP_interaction_block
@@ -369,62 +372,94 @@ def patch_electric_field(
     layers: OrderedDict, config: Dict[str, Any]
 ) -> OrderedDict:
     """
-    Make a field-free model field-aware, additively.
+    Attach the explicit electric-enthalpy heads to a field-free model.
 
     Inserts, and touches nothing else:
-      * 'electric_field_prepare'          at the very front
-      * '{t}_field_self_connection'       right after '{t}_self_connection_intro',
-                                          for each t in field_injection_layers
-      * 'field_response'                  right before 'force_output'
+      * 'electric_field_prepare'  at the very front
+      * 'field_tensor_heads'      atomic dipole and polarizability heads:
+                                  'linear' / 'gate': right before
+                                  '{last}_self_connection_intro' (node features
+                                  entering the last conv layer); 'bond': right
+                                  before the energy readout (final scalars);
+                                  'bond_multi': same place, plus 'field_tap_{t}'
+                                  after every '{t}_equivariant_gate' but the last
+      * 'field_enthalpy'          right before 'force_output'
+                                  (adds -E.M - 1/2 E.alpha.E to the energy)
 
     No pretrained tensor changes shape.
     """
     if not config.get(KEY.USE_ELECTRIC_FIELD, False):
         return layers
 
-    field_lmax = config[KEY.FIELD_LMAX]
-    inject_at = config[KEY.FIELD_INJECTION_LAYERS]
-    num_conv = config[KEY.NUM_CONVOLUTION]
-
+    head_kind = config.get(KEY.FIELD_HEAD, 'linear')
     _layers = list(layers.items())
-    for t in sorted(set(inject_at), reverse=True):
-        if t < 0 or t >= num_conv:
-            raise ValueError(
-                f'field_injection_layers contains {t}, but this model has '
-                f'{num_conv} convolution layers'
-            )
-        anchor = f'{t}_self_connection_intro'
+    if head_kind in ('bond', 'bond_multi'):
+        # after the last conv layer, on its scalar features
+        anchor = next(k for k in ('reduce_input_to_hidden', 'readout_FCN') if k in layers)
+        module = layers[anchor]
+        irreps_x = Irreps(
+            module.irreps_in if hasattr(module, 'irreps_in') else module.linear.irreps_in
+        )
+        num_basis = config[KEY.RADIAL_BASIS][KEY.BESSEL_BASIS_NUM]
+        tap_keys, tap_dims = [], []
+        if head_kind == 'bond_multi':
+            # 0e features after every interaction block but the last (the last one is irreps_x)
+            for t in range(config[KEY.NUM_CONVOLUTION] - 1):
+                gate_name = f'{t}_equivariant_gate'
+                gate_irreps_out = next(
+                    m.irreps_out for m in layers[gate_name].modules() if hasattr(m, 'irreps_out')
+                )
+                tap = FieldFeatureTap(Irreps(gate_irreps_out), f'field_tap_{t}')
+                at = [i for i, (k, _) in enumerate(_layers) if k == gate_name][0]
+                _layers.insert(at + 1, (f'field_tap_{t}', tap))
+                tap_keys.append(f'field_tap_{t}')
+                tap_dims.append(len(tap.scalar_index))
+        heads = FieldBondHeads(
+            irreps_x=irreps_x,
+            num_basis=num_basis,
+            hidden_neurons=config[KEY.FIELD_HEAD_HIDDEN],
+            tap_keys=tap_keys,
+            tap_dims=tap_dims,
+        )
+    else:
+        last = config[KEY.NUM_CONVOLUTION] - 1
+        anchor = f'{last}_self_connection_intro'
         sc = layers.get(anchor)
         if sc is None:
             raise ValueError(
-                f'cannot inject the field at layer {t}: {anchor} not found. '
+                f'cannot attach the field heads: {anchor} not found. '
                 "self_connection_type 'none' is not supported."
             )
-        irreps_x = Irreps(sc.irreps_in if hasattr(sc, 'irreps_in') else sc.irreps_in1)
-        irreps_out = Irreps(sc.irreps_out)
-        module = ElectricFieldSelfConnection(
-            irreps_x=irreps_x,
-            irreps_out=irreps_out,
-            field_lmax=field_lmax,
+        irreps_x = Irreps(
+            sc.irreps_in if hasattr(sc, 'irreps_in') else sc.irreps_in1
         )
-        if module.num_paths() == 0:
-            raise ValueError(
-                f'field injection at layer {t} has no symmetry-allowed paths: '
-                f'{irreps_x} (x) {module.irreps_field} -> {irreps_out} is empty. '
-                'The backbone needs odd-parity features for this to work.'
+        if head_kind == 'gate':
+            heads = FieldGateHeads(
+                irreps_x=irreps_x,
+                num_alpha_vectors=config[KEY.FIELD_ALPHA_VECTORS],
+                hidden_multiplicity=config[KEY.FIELD_HEAD_HIDDEN],
             )
-        _layers = _insert_after(
-            anchor, (f'{t}_field_self_connection', module), _layers
+        else:
+            heads = FieldTensorHeads(
+                irreps_x=irreps_x,
+                num_alpha_vectors=config[KEY.FIELD_ALPHA_VECTORS],
+            )
+    if heads.num_paths() == 0:
+        raise ValueError(
+            f'field head {head_kind!r} has no input path from {irreps_x}; '
+            'the dipole head needs odd-parity vectors (or 0e for bond).'
         )
 
+    idx = [i for i, (k, _) in enumerate(_layers) if k == anchor][0]
+    _layers.insert(idx, ('field_tensor_heads', heads))
     _layers.insert(0, ('electric_field_prepare', ElectricFieldPrepare()))
 
     idx = [i for i, (k, _) in enumerate(_layers) if k == 'force_output']
-    response = ('field_response', FieldResponseOutput())
+    enthalpy = ('field_enthalpy', FieldEnthalpyOutput())
     if idx:
-        _layers.insert(idx[0], response)
+        _layers.insert(idx[0], enthalpy)
     else:
-        _layers.append(response)  # parallel models have no force_output
+        _layers.append(enthalpy)  # parallel models have no force_output
 
     return OrderedDict(_layers)
 

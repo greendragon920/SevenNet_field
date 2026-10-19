@@ -79,6 +79,8 @@ POLARIZATION: Final[str] = 'polarization'  # (1, 3), e/Angstrom^2
 # predictions
 PRED_POLARIZATION: Final[str] = 'inferred_polarization'
 PRED_DIPOLE: Final[str] = 'inferred_dipole'
+ATOMIC_DIPOLE: Final[str] = 'atomic_dipole'  # (N, 3), e * Angstrom
+ATOMIC_POLARIZABILITY: Final[str] = 'atomic_polarizability'  # (N, 3, 3), e * Angstrom^2 / V
 PRED_BEC: Final[str] = 'inferred_born_effective_charges'
 PRED_SUSCEPTIBILITY: Final[str] = 'inferred_susceptibility'
 
@@ -270,8 +272,9 @@ USE_OEQ = 'use_oeq'
 
 # ~~ electric field response model configuration ~~ #
 USE_ELECTRIC_FIELD = 'use_electric_field'
-FIELD_LMAX = 'field_lmax'
-FIELD_INJECTION_LAYERS = 'field_injection_layers'
+FIELD_ALPHA_VECTORS = 'field_alpha_vectors'
+FIELD_HEAD = 'field_head'
+FIELD_HEAD_HIDDEN = 'field_head_hidden'
 
 REG_PARAM = 'regularization_param'
 REG_WEIGHT = 'regularization_weight'

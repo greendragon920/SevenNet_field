@@ -109,11 +109,10 @@ class AtomGraphSequential(nn.Sequential):
 
     @torch.jit.unused
     def set_compute_field_response(self, flag: bool) -> None:
-        # skip the derivatives that give the field response outputs
-        # (dipole, P, Z*, chi)
-        module = self._modules.get('field_response')
+        # skip the Z* derivative (dipole, P, chi are direct outputs)
+        module = self._modules.get('field_enthalpy')
         if module is not None:
-            module.enabled = flag  # type: ignore
+            module.compute_bec = flag  # type: ignore
 
     def get_irreps_in(self, modlue_name: str, attr_key: str = 'irreps_in'):
         tg_module = self._modules[modlue_name]
