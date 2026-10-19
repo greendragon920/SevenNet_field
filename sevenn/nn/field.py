@@ -159,6 +159,7 @@ class FieldResponseOutput(nn.Module):
         self.compute_bec = compute_bec
         self.compute_susceptibility = compute_susceptibility
         self.enabled = True
+        self.vmap_directions = True
         self._is_batch_data = True
 
     def _volume(self, data: AtomGraphDataType) -> torch.Tensor:
@@ -194,6 +195,11 @@ class FieldResponseOutput(nn.Module):
         need_second = self.compute_bec or self.compute_susceptibility
         if not need_second:
             return data
+
+        if self.vmap_directions and not torch.jit.is_scripting():
+            return self._second_derivatives_vmap(
+                data, dipole, rij, field, edge_idx, n_atom, volume
+            )
 
         bec_cols: List[torch.Tensor] = []
         chi_cols: List[torch.Tensor] = []
@@ -245,6 +251,57 @@ class FieldResponseOutput(nn.Module):
             data[KEY.PRED_BEC] = torch.stack(bec_cols, dim=1)
         if self.compute_susceptibility:
             chi = torch.stack(chi_cols, dim=1)  # (n_graph, 3, 3)
+            data[KEY.PRED_SUSCEPTIBILITY] = (
+                chi / volume.view(-1, 1, 1) / EPS0_E_PER_V_ANGSTROM
+            )
+        return data
+
+    @torch.jit.unused
+    def _second_derivatives_vmap(
+        self,
+        data: AtomGraphDataType,
+        dipole: torch.Tensor,
+        rij: torch.Tensor,
+        field: torch.Tensor,
+        edge_idx: torch.Tensor,
+        n_atom: int,
+        volume: torch.Tensor,
+    ) -> AtomGraphDataType:
+        wrt = []
+        if self.compute_bec:
+            wrt.append(rij)
+        if self.compute_susceptibility:
+            wrt.append(field)
+        seeds = torch.eye(3, dtype=dipole.dtype, device=dipole.device)[:, None, :]
+        seeds = seeds.expand(3, dipole.shape[0], 3).contiguous()
+
+        def directional_grad(seed):
+            return torch.autograd.grad(
+                [dipole], wrt, grad_outputs=[seed],
+                create_graph=self.training, retain_graph=True, allow_unused=True,
+            )
+
+        grads = torch.func.vmap(directional_grad)(seeds)
+        cursor = 0
+        if self.compute_bec:
+            g_edge = grads[cursor]
+            cursor += 1
+            if g_edge is None:
+                bec = torch.zeros(n_atom, 3, 3, dtype=rij.dtype, device=rij.device)
+            else:
+                pf = torch.zeros(3, n_atom, 3, dtype=g_edge.dtype, device=g_edge.device)
+                nf = torch.zeros(3, n_atom, 3, dtype=g_edge.dtype, device=g_edge.device)
+                pf = pf.index_add(1, edge_idx[0], g_edge)
+                nf = nf.index_add(1, edge_idx[1], g_edge)
+                bec = (nf - pf).permute(1, 0, 2)
+            data[KEY.PRED_BEC] = bec
+        if self.compute_susceptibility:
+            g_field = grads[cursor]
+            if g_field is None:
+                g_field = torch.zeros(
+                    3, *field.shape, dtype=field.dtype, device=field.device
+                )
+            chi = g_field.permute(1, 0, 2)
             data[KEY.PRED_SUSCEPTIBILITY] = (
                 chi / volume.view(-1, 1, 1) / EPS0_E_PER_V_ANGSTROM
             )

@@ -312,6 +312,8 @@ def patch_cue(layers: OrderedDict, config: Dict[str, Any]) -> OrderedDict:
             updates[k] = module_patched
 
     layers.update(updates)
+    if 'field_response' in layers:
+        layers['field_response'].vmap_directions = False
     return layers
 
 
@@ -338,6 +340,14 @@ def patch_flash_tp(layers: OrderedDict, config: Dict[str, Any]) -> OrderedDict:
             updates[k] = flash_helper.patch_convolution(module, _flash_lammps)
 
     layers.update(updates)
+    if 'field_response' in layers:
+        try:
+            import flashTP_e3nn.vmap_rules  # noqa: F401
+            has_vmap_rules = True
+        except ImportError:
+            has_vmap_rules = False
+        if _flash_lammps or not has_vmap_rules:
+            layers['field_response'].vmap_directions = False
     return layers
 
 
@@ -362,6 +372,8 @@ def patch_oeq(layers: OrderedDict, config: Dict[str, Any]) -> OrderedDict:
             updates[k] = oeq_helper.patch_convolution(module)
 
     layers.update(updates)
+    if 'field_response' in layers:
+        layers['field_response'].vmap_directions = False
     return layers
 
 
