@@ -153,6 +153,7 @@ DTYPE = 'dtype'
 
 TRAIN_SHUFFLE = 'train_shuffle'
 
+IS_TRAIN_FORCE = 'is_train_force'
 IS_TRAIN_STRESS = 'is_train_stress'
 IS_TRAIN_BEC = 'is_train_bec'
 IS_TRAIN_SUSCEPTIBILITY = 'is_train_susceptibility'

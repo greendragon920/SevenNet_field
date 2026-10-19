@@ -121,6 +121,8 @@ def _untrained_targets(config):
     ):
         if not config.get(flag, on_by_default):
             untrained.add(target)
+    if not config.get(KEY.IS_TRAIN_FORCE, True):
+        untrained |= {'Force', 'Stress'}
     return untrained
 
 

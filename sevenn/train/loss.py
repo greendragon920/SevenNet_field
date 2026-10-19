@@ -538,8 +538,9 @@ def get_loss_functions_from_config(
     use_weight = config.get(KEY.USE_WEIGHT, False)
     commons = {'use_weight': use_weight}
 
-    keys = ['energy', 'force']
-    if config[KEY.IS_TRAIN_STRESS]:
+    train_force = config.get(KEY.IS_TRAIN_FORCE, True)
+    keys = ['energy', 'force'] if train_force else ['energy']
+    if config[KEY.IS_TRAIN_STRESS] and train_force:
         keys += ['stress']
     if config[KEY.IS_TRAIN_BEC]:
         keys += ['bec']
