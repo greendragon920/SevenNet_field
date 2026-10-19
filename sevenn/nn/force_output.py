@@ -164,11 +164,14 @@ class ForceStressOutputFromEdge(nn.Module):
         self.key_cell_volume = data_key_cell_volume
         self.use_atomic_virial = use_atomic_virial
         self._is_batch_data = True
+        self.skip = False
 
     def get_grad_key(self) -> str:
         return self.key_edge
 
     def forward(self, data: AtomGraphDataType) -> AtomGraphDataType:
+        if self.skip:
+            return data
         tot_num = torch.sum(data[KEY.NUM_ATOMS])  # ? item?
         rij = data[self.key_edge]
         energy = [(data[self.key_energy]).sum()]

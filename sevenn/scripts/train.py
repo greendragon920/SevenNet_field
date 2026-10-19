@@ -217,6 +217,9 @@ def train_v2(config: Dict[str, Any], working_dir: str) -> None:
     model = build_E3_equivariant_model(config)
     log.print_model_info(model, config)
     freeze_backbone_for_field_training(model, config, log)
+    if not config.get(KEY.IS_TRAIN_FORCE, True):
+        model._modules['force_output'].skip = True
+        log.write('Force and stress are not computed during training\n')
 
     if config.get(KEY.REHEARSAL, False):
         memory_loader = build_memory_loader(config)
