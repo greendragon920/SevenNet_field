@@ -372,8 +372,6 @@ def patch_oeq(layers: OrderedDict, config: Dict[str, Any]) -> OrderedDict:
             updates[k] = oeq_helper.patch_convolution(module)
 
     layers.update(updates)
-    if 'field_response' in layers:
-        layers['field_response'].vmap_directions = False
     return layers
 
 
