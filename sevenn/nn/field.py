@@ -381,6 +381,9 @@ class FieldEnthalpyOutput(nn.Module):
         self.key_cell_volume = data_key_cell_volume
         self.compute_bec = compute_bec
         self._is_batch_data = True
+        # H034 local patch: the three d(dipole_a)/dr derivatives in one torch.func.vmap call (as FieldResponseOutput on
+        # field_1, commits 76295df / 674fc61); False -> the original per-direction loop below.
+        self.vmap_directions = True
 
     def _volume(self, data: AtomGraphDataType) -> torch.Tensor:
         vlim = 1e-3  # cell volume is 0 for non-PBC structures
@@ -438,6 +441,9 @@ class FieldEnthalpyOutput(nn.Module):
 
         rij = data[self.key_edge]
         edge_idx = data[self.key_edge_idx]
+        if self.vmap_directions and not torch.jit.is_scripting():
+            data[KEY.PRED_BEC] = self._bec_vmap(dipole, rij, edge_idx, n_atom)
+            return data
         bec_cols: List[torch.Tensor] = []
         for a in range(3):
             g_edge = torch.autograd.grad(
@@ -461,3 +467,23 @@ class FieldEnthalpyOutput(nn.Module):
         # index order [atom, polarization a, position b]
         data[KEY.PRED_BEC] = torch.stack(bec_cols, dim=1)
         return data
+
+    @torch.jit.unused
+    def _bec_vmap(self, dipole: torch.Tensor, rij: torch.Tensor, edge_idx: torch.Tensor, n_atom: int) -> torch.Tensor:
+        # H034 local patch: same derivatives and scatter as the loop, three directions vmapped
+        seeds = torch.eye(3, dtype=dipole.dtype, device=dipole.device)[:, None, :]
+        seeds = seeds.expand(3, dipole.shape[0], 3).contiguous()
+
+        def directional_grad(seed):
+            return torch.autograd.grad(
+                [dipole], [rij], grad_outputs=[seed],
+                create_graph=self.training, retain_graph=True, allow_unused=True,
+            )[0]
+
+        g_edge = torch.func.vmap(directional_grad)(seeds)  # (3, n_edge, 3)
+        if g_edge is None:
+            return torch.zeros(n_atom, 3, 3, dtype=rij.dtype, device=rij.device)
+        pf = torch.zeros(3, n_atom, 3, dtype=g_edge.dtype, device=g_edge.device).index_add(1, edge_idx[0], g_edge)
+        nf = torch.zeros(3, n_atom, 3, dtype=g_edge.dtype, device=g_edge.device).index_add(1, edge_idx[1], g_edge)
+        # index order [atom, polarization a, position b], as torch.stack(bec_cols, dim=1)
+        return (nf - pf).permute(1, 0, 2)
