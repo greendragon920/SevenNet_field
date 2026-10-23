@@ -275,6 +275,7 @@ USE_ELECTRIC_FIELD = 'use_electric_field'
 FIELD_ALPHA_VECTORS = 'field_alpha_vectors'
 FIELD_HEAD = 'field_head'
 FIELD_HEAD_HIDDEN = 'field_head_hidden'
+FIELD_ALPHA_ISOTROPIC = 'field_alpha_isotropic'
 
 REG_PARAM = 'regularization_param'
 REG_WEIGHT = 'regularization_weight'

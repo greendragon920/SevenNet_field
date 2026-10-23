@@ -167,6 +167,7 @@ DEFAULT_E3_EQUIVARIANT_MODEL_CONFIG = {
     KEY.FIELD_ALPHA_VECTORS: 4,
     KEY.FIELD_HEAD: 'linear',
     KEY.FIELD_HEAD_HIDDEN: 16,
+    KEY.FIELD_ALPHA_ISOTROPIC: True,
 }
 
 
@@ -219,8 +220,9 @@ MODEL_CONFIG_CONDITION = {
     KEY.USE_OEQ: bool,
     KEY.USE_ELECTRIC_FIELD: bool,
     KEY.FIELD_ALPHA_VECTORS: lambda x: isinstance(x, int) and x >= 1,
-    KEY.FIELD_HEAD: lambda x: x in ('linear', 'gate', 'bond', 'bond_multi'),
+    KEY.FIELD_HEAD: lambda x: x in ('linear', 'gate', 'bond', 'bond_multi', 'branch'),
     KEY.FIELD_HEAD_HIDDEN: lambda x: isinstance(x, int) and x >= 1,
+    KEY.FIELD_ALPHA_ISOTROPIC: lambda x: isinstance(x, bool),
 }
 
 

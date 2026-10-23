@@ -25,13 +25,13 @@ Forces at finite E come from differentiating F through the usual force output.
 """
 
 import math
-from typing import List
+from typing import Dict, List
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from e3nn.nn import Gate
-from e3nn.o3 import Irreps, Linear, SphericalHarmonics
+from e3nn.o3 import Irreps, Linear, ReducedTensorProducts, SphericalHarmonics
 
 import sevenn._keys as KEY
 from sevenn._const import AtomGraphDataType
@@ -187,6 +187,76 @@ class FieldGateHeads(nn.Module):
         data[self.key_polarizability] = torch.einsum(
             'nka,nkb->nab', vectors, vectors
         ) + isotropic.unsqueeze(-1) * eye
+        return data
+
+
+class FieldBranchHeads(nn.Module):
+    """
+    A field-only copy of the last interaction block (same input as the backbone's
+    last layer, output 0e + 1o + 2e after the gate), run on the side: the
+    backbone's node features are restored afterwards. From its output:
+
+        mu_i    = Linear(-> 1x1o)                       atom-centred dipole (odd)
+        S_i     = a_i I + B_i,  (a_i, B_i) = Linear(-> 1x0e + 1x2e)   (even)
+        alpha_i = S_i S_i  (+ softplus(s_i) I if use_isotropic)
+
+    alpha is even under inversion, so it is built from the even 0e + 2e outputs:
+    unlike outer products of 1o vectors it stays anisotropic on inversion-centre
+    sites, where every 1o feature vanishes. The square of a symmetric matrix is
+    positive semi-definite, with no bound tying a_i to B_i.
+    """
+
+    def __init__(
+        self,
+        block: Dict[str, nn.Module],
+        irreps_hidden: Irreps,
+        use_isotropic: bool = True,
+        data_key_x: str = KEY.NODE_FEATURE,
+        data_key_dipole: str = KEY.ATOMIC_DIPOLE,
+        data_key_polarizability: str = KEY.ATOMIC_POLARIZABILITY,
+    ) -> None:
+        super().__init__()
+        self.key_x = data_key_x
+        self.key_dipole = data_key_dipole
+        self.key_polarizability = data_key_polarizability
+        self.block = nn.ModuleDict(block)
+        # AtomGraphSequential instantiates lazy layers of its top-level modules only
+        for module in self.block.values():
+            if not getattr(module, 'layer_instantiated', True):
+                module.instantiate()
+        self.irreps_hidden = Irreps(irreps_hidden)
+        self.use_isotropic = use_isotropic
+        self.dipole_linear = Linear(self.irreps_hidden, Irreps('1x1o'))
+        symmetric = ReducedTensorProducts('ij=ji', i='1o')
+        assert symmetric.irreps_out == Irreps('1x0e+1x2e')
+        self.root_linear = Linear(self.irreps_hidden, symmetric.irreps_out)
+        self.register_buffer('symmetric_basis', symmetric.change_of_basis.clone())
+        if use_isotropic:
+            self.alpha_scalar_linear = Linear(self.irreps_hidden, Irreps('1x0e'))
+        self.register_buffer('to_cartesian', _sph_to_cartesian())
+
+    def num_paths(self) -> int:
+        return len(self.dipole_linear.instructions) * len(self.root_linear.instructions)
+
+    def forward(self, data: AtomGraphDataType) -> AtomGraphDataType:
+        x_backbone = data[self.key_x]
+        for module in self.block.values():
+            data = module(data)
+        hidden = data[self.key_x]
+        data[self.key_x] = x_backbone
+        to_cartesian = self.to_cartesian.to(dtype=hidden.dtype)
+        mu = self.dipole_linear(hidden) @ to_cartesian
+        root = torch.einsum(
+            'nk,kab->nab', self.root_linear(hidden),
+            self.symmetric_basis.to(dtype=hidden.dtype),
+        )
+        alpha = root @ root
+        if self.use_isotropic:
+            isotropic = F.softplus(self.alpha_scalar_linear(hidden))
+            eye = torch.eye(3, dtype=hidden.dtype, device=hidden.device)
+            alpha = alpha + isotropic.unsqueeze(-1) * eye
+        data[self.key_dipole] = mu
+        data[self.key_polarizability] = alpha
         return data
 
 

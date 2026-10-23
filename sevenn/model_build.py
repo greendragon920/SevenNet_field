@@ -22,6 +22,7 @@ from .nn.field import (
     FieldFeatureTap,
     ElectricFieldPrepare,
     FieldBondHeads,
+    FieldBranchHeads,
     FieldEnthalpyOutput,
     FieldGateHeads,
     FieldTensorHeads,
@@ -368,6 +369,40 @@ def patch_oeq(layers: OrderedDict, config: Dict[str, Any]) -> OrderedDict:
     return layers
 
 
+def _field_branch_heads(
+    layers: OrderedDict, config: Dict[str, Any], irreps_x: Irreps, last: int
+) -> FieldBranchHeads:
+    """Field-only copy of the last interaction block, output (mul)x0e + (mul)x1o + (mul)x2e."""
+    edge_embedding = layers['edge_embedding']
+    mul = config[KEY.NODE_FEATURE_MULTIPLICITY]
+    irreps_filter = edge_embedding.spherical.irreps_out
+    irreps_out = Irreps(f'{mul}x0e+{mul}x1o+{mul}x2e')
+    act_scalar = {k: _const.ACTIVATION_DICT[k][v] for k, v in config[KEY.ACTIVATION_SCARLAR].items()}
+    act_gate = {k: _const.ACTIVATION_DICT[k][v] for k, v in config[KEY.ACTIVATION_GATE].items()}
+    block = NequIP_interaction_block(
+        irreps_x=irreps_x,
+        irreps_filter=irreps_filter,
+        irreps_out_tp=util.infer_irreps_out(irreps_x, irreps_filter, 2, 'sph'),
+        irreps_out=irreps_out,
+        weight_nn_layers=[edge_embedding.basis_function.num_basis]
+        + config[KEY.CONVOLUTION_WEIGHT_NN_HIDDEN_NEURONS],
+        conv_denominator=float(layers[f'{last}_convolution'].denominator),
+        train_conv_denominator=False,
+        self_connection_pair=init_self_connection(config)[last],
+        act_scalar=act_scalar,
+        act_gate=act_gate,
+        act_radial=_const.ACTIVATION[config[KEY.ACTIVATION_RADIAL]],
+        bias_in_linear=config[KEY.USE_BIAS_IN_LINEAR],
+        num_species=config[KEY.NUM_SPECIES],
+        t='field_branch',  # type: ignore
+    )
+    return FieldBranchHeads(
+        block=block,
+        irreps_hidden=irreps_out,
+        use_isotropic=config[KEY.FIELD_ALPHA_ISOTROPIC],
+    )
+
+
 def patch_electric_field(
     layers: OrderedDict, config: Dict[str, Any]
 ) -> OrderedDict:
@@ -433,7 +468,9 @@ def patch_electric_field(
         irreps_x = Irreps(
             sc.irreps_in if hasattr(sc, 'irreps_in') else sc.irreps_in1
         )
-        if head_kind == 'gate':
+        if head_kind == 'branch':
+            heads = _field_branch_heads(layers, config, irreps_x, last)
+        elif head_kind == 'gate':
             heads = FieldGateHeads(
                 irreps_x=irreps_x,
                 num_alpha_vectors=config[KEY.FIELD_ALPHA_VECTORS],
